@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 
 # Force UTF-8 output regardless of console locale (avoids mojibake on Windows
 # GBK consoles; Linux terminals are already UTF-8).
@@ -80,6 +80,12 @@ PORT = CONF.get("WLT_CONNECT_PORT", CONF.get("WLT_TUNNEL_PORT", "18081"))
 BASE = f"http://127.0.0.1:{PORT}"
 TOKEN = CONF.get("WLT_AGENT_TOKEN", "")
 TIMEOUT = float(os.environ.get("WLT_TIMEOUT", "120"))
+# Added to the execution timeout when a persistent job is waited on.
+# Separate from --timeout (Windows kills the tree) and from connect failure.
+WAIT_MARGIN = float(os.environ.get("WLT_WAIT_MARGIN", "30"))
+
+# Must match win/wlt_jobs.py request_id_error. The id is a single filename.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def die(msg, code=1):
@@ -87,8 +93,12 @@ def die(msg, code=1):
     sys.exit(code)
 
 
-def api(method, path, body=None):
-    """Call the agent. Returns parsed JSON. Exit 125 when unreachable."""
+def api(method, path, body=None, timeout=None):
+    """Call the agent. Returns parsed JSON. Exit 125 when unreachable.
+
+    `timeout` is the HTTP wait for this call. Connection refused still fails
+    immediately (exit 125). A socket timeout is exit 124 (state unknown).
+    """
     url = BASE + path
     data = None
     headers = {"Authorization": f"Bearer {TOKEN}"}
@@ -97,7 +107,7 @@ def api(method, path, body=None):
         headers["Content-Type"] = "application/json; charset=utf-8"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT if timeout is None else timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -353,28 +363,203 @@ def cmd_doctor(_):
     print(json.dumps(api("GET", "/doctor"), indent=2, ensure_ascii=False))
 
 
+def request_id_error(request_id):
+    """None when empty or safe. Kept in lockstep with win/wlt_jobs.py."""
+    if not request_id:
+        return None
+    if request_id in (".", "..") or not _REQUEST_ID_RE.fullmatch(request_id):
+        return ("request_id must be 1-128 chars of letters, digits, '.', '_', '-' "
+                "and must not contain a path separator")
+    return None
+
+
+def parse_env_pairs(items):
+    """--env K=V, repeatable. The value may itself contain '='."""
+    env = {}
+    for item in items or []:
+        text = str(item)
+        if "=" not in text:
+            raise ValueError(f"--env expects K=V, got {item!r}")
+        key, value = text.split("=", 1)
+        if not key or any(ch in key for ch in "\r\n\x00"):
+            raise ValueError(f"--env has an empty or invalid name: {item!r}")
+        env[key] = value
+    return env
+
+
+def build_exec_payload(cmd_args, shell=None, timeout=120, cwd=None, env_items=None,
+                       exe=None, request_id=None, resource=None, note=None):
+    """Body shared by synchronous /run and /job/start.
+
+    /run understands cmd or exe+argv, shell, timeout, cwd, env.
+    /job/start adds request_id, resource, note. Callers that stay on /run
+    must drop the job-only keys (see payload_for_run).
+    """
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be a positive number")
+    if timeout <= 0:
+        raise ValueError("timeout must be a positive number")
+    err = request_id_error(request_id)
+    if err:
+        raise ValueError(err)
+    payload = {"timeout": timeout}
+    if shell:
+        payload["shell"] = shell
+    if cwd:
+        payload["cwd"] = cwd
+    env = parse_env_pairs(env_items)
+    if env:
+        payload["env"] = env
+    command = list(cmd_args or [])
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if exe:
+        payload["exe"] = exe
+        payload["argv"] = command
+    else:
+        if not command:
+            raise ValueError("provide a command, or --exe")
+        payload["cmd"] = " ".join(command)
+    if request_id:
+        payload["request_id"] = request_id
+    if resource:
+        payload["resource"] = resource
+    if note:
+        payload["note"] = note
+    return payload
+
+
+def exec_payload_from_args(args):
+    return build_exec_payload(
+        cmd_args=getattr(args, "cmd", None),
+        shell=getattr(args, "shell", None),
+        timeout=getattr(args, "timeout", 120),
+        cwd=getattr(args, "cwd", None),
+        env_items=getattr(args, "env", None),
+        exe=getattr(args, "exe", None),
+        request_id=getattr(args, "request_id", None),
+        resource=getattr(args, "resource", None),
+        note=getattr(args, "note", None),
+    )
+
+
+def run_uses_job(args):
+    """True when the flag only exists on the persistent job engine.
+
+    Synchronous /run has cwd, env, exe, and an execution timeout. It does not
+    dedup request ids and it does not return before the process ends, so
+    --request-id, --no-wait, and an explicit --wait select /job/start.
+    """
+    if getattr(args, "request_id", None) or getattr(args, "no_wait", False):
+        return True
+    wait = getattr(args, "wait", 0) or 0
+    return float(wait) > 0
+
+
+def payload_for_run(args):
+    body = exec_payload_from_args(args)
+    if run_uses_job(args):
+        return "job", body
+    for key in ("request_id", "resource", "note"):
+        body.pop(key, None)
+    return "sync", body
+
+
+def client_wait_seconds(args, margin=None):
+    """How long this process waits. Independent of the execution timeout."""
+    if margin is None:
+        margin = WAIT_MARGIN
+    wait = getattr(args, "wait", 0) or 0
+    if float(wait) > 0:
+        return float(wait)
+    return float(args.timeout) + float(margin)
+
+
+def window_target_body(action, title=None, hwnd=None):
+    body = {"action": action}
+    if hwnd not in (None, ""):
+        body["hwnd"] = hwnd
+    elif title not in (None, ""):
+        body["title"] = title
+    else:
+        raise ValueError("provide --title or --hwnd")
+    return body
+
+
+def _write_stream(text, stream):
+    if not text:
+        return
+    stream.write(text)
+    if not text.endswith("\n"):
+        stream.write("\n")
+
+
 def cmd_run(args):
-    body = {"cmd": " ".join(args.cmd), "timeout": args.timeout}
-    if args.shell:
-        body["shell"] = args.shell
-    if args.cwd:
-        body["cwd"] = args.cwd
-    res = api("POST", "/run", body)
+    try:
+        mode, body = payload_for_run(args)
+    except ValueError as exc:
+        die(str(exc), 2)
+    if mode == "job":
+        _run_via_job(args, body)
+    else:
+        _run_sync(args, body)
+
+
+def _run_sync(args, body):
+    # The agent enforces --timeout and then returns. The HTTP wait has to
+    # outlive that, or the client would report 124 while Windows is still
+    # inside the execution timeout. Connect failure is still exit 125.
+    res = api("POST", "/run", body, timeout=max(float(args.timeout) + 15.0, 30.0))
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
-        return
+        if not res.get("ok"):
+            sys.exit(126)
+        if res.get("timed_out"):
+            sys.exit(124)
+        rc = res.get("rc")
+        sys.exit(0 if rc == 0 else (rc or 1))
     if not res.get("ok"):
         die(f"{res.get('error_code')}: {res.get('detail', '')}", 126)
-    if res.get("out"):
-        sys.stdout.write(res["out"])
-        if not res["out"].endswith("\n"):
-            sys.stdout.write("\n")
-    if res.get("err"):
-        sys.stderr.write(res["err"])
+    _write_stream(res.get("out"), sys.stdout)
+    _write_stream(res.get("err"), sys.stderr)
     if res.get("timed_out"):
         die(f"command timed out after {args.timeout}s (process killed)", 124)
     rc = res.get("rc")
     sys.exit(0 if rc == 0 else (rc or 1))
+
+
+def _run_via_job(args, body):
+    """request-id dedup and --no-wait live here. Three timeouts stay separate:
+    connect failure -> 125, execution --timeout kills the tree on Windows,
+    client --wait (default: execution + WLT_WAIT_MARGIN) -> 124 if still running.
+    """
+    res = api("POST", "/job/start", body, timeout=30)
+    if not res.get("ok"):
+        die(f"{res.get('error_code')}: {res.get('detail', '')}", 126)
+    if res.get("dedup"):
+        print(f"wlt: request_id already used; reusing job {res.get('id')}", file=sys.stderr)
+    if args.no_wait:
+        if args.json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        else:
+            print(f"job {res.get('id')}  state={res.get('state')}"
+                  + ("  (dedup: existing job returned)" if res.get("dedup") else ""))
+        sys.exit(0)
+    wait = client_wait_seconds(args)
+    st = api("POST", "/job/status", {"job_id": res["id"], "wait": wait}, timeout=wait + 15)
+    if args.json and st.get("state") in ("QUEUED", "RUNNING"):
+        print(json.dumps(st, indent=2, ensure_ascii=False))
+        die("client wait expired; job still running (state unknown, NOT a failure)", 124)
+    if st.get("state") not in ("QUEUED", "RUNNING"):
+        result = api("POST", "/job/result", {"job_id": res["id"]}, timeout=30)
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            _exit_for_job(st, quiet=True)
+        for which, stream in (("stdout", sys.stdout), ("stderr", sys.stderr)):
+            _write_stream((result.get(which) or {}).get("text"), stream)
+    _exit_for_job(st)
 
 
 def cmd_tunnel_add(args):
@@ -480,11 +665,10 @@ def cmd_tunnel_probe(args):
 # --------------------------------------------------------------------------
 
 def cmd_job_start(args):
-    body = {"cmd": " ".join(args.cmd), "timeout": args.timeout}
-    for k in ("shell", "cwd", "request_id", "resource", "note"):
-        v = getattr(args, k, None)
-        if v:
-            body[k] = v
+    try:
+        body = exec_payload_from_args(args)
+    except ValueError as exc:
+        die(str(exc), 2)
     res = api("POST", "/job/start", body)
     if not res.get("ok"):
         die(f"{res.get('error_code')}: {res.get('detail', '')}", 126)
@@ -494,14 +678,18 @@ def cmd_job_start(args):
     print(f"job {res.get('id')}  state={res.get('state')}"
           + ("  (dedup: existing job returned)" if res.get("dedup") else ""))
     if args.wait and args.wait > 0:
-        st = api("POST", "/job/status", {"job_id": res["id"], "wait": args.wait})
+        # HTTP wait must outlive the server-side wait or the client times out
+        # first and the execution timeout is no longer observable.
+        st = api("POST", "/job/status", {"job_id": res["id"], "wait": args.wait},
+                 timeout=float(args.wait) + 15)
         _exit_for_job(st)
 
 
-def _exit_for_job(st):
+def _exit_for_job(st, quiet=False):
     state = st.get("state")
-    print(f"job {st.get('id')}  state={state}  exit_code={st.get('exit_code')}  "
-          f"error={st.get('error_code')}")
+    if not quiet:
+        print(f"job {st.get('id')}  state={state}  exit_code={st.get('exit_code')}  "
+              f"error={st.get('error_code')}")
     if state in ("QUEUED", "RUNNING"):
         die("client wait expired; job still running (state unknown, NOT a failure)", 124)
     if state == "CANCELLED":
@@ -515,7 +703,8 @@ def _exit_for_job(st):
 
 
 def cmd_job_status(args):
-    st = api("POST", "/job/status", {"job_id": args.id, "wait": args.wait})
+    http_timeout = float(args.wait) + 15 if args.wait and args.wait > 0 else None
+    st = api("POST", "/job/status", {"job_id": args.id, "wait": args.wait}, timeout=http_timeout)
     if args.json:
         print(json.dumps(st, indent=2, ensure_ascii=False))
         return
@@ -655,15 +844,79 @@ def cmd_windows(args):
               f"{w.get('process','')[:22]:<24}{w.get('title','')[:60]}")
 
 
-def cmd_focus(args):
-    body = {"action": "focus"}
-    if args.hwnd:
-        body["hwnd"] = args.hwnd
-    elif args.title:
-        body["title"] = args.title
-    else:
-        die("provide --title or --hwnd", 2)
+def _window_cmd(action, args):
+    try:
+        body = window_target_body(action, getattr(args, "title", None), getattr(args, "hwnd", None))
+    except ValueError as exc:
+        die(str(exc), 2)
     print(json.dumps(api("POST", "/window", body), ensure_ascii=False))
+
+
+def cmd_focus(args):
+    _window_cmd("focus", args)
+
+
+def cmd_close(args):
+    """Post WM_CLOSE. The agent returns once the message is posted; the
+    window may ignore it. This does not kill the process."""
+    _window_cmd("close", args)
+
+
+def cmd_proc(args):
+    body = {"limit": args.limit}
+    if args.name:
+        body["name"] = args.name
+    if args.pid is not None:
+        body["pid"] = args.pid
+    res = api("POST", "/proc", body)
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    rows = res.get("processes", [])
+    print(f"  {'PID':<8}{'PPID':<8}NAME")
+    agent_pid = res.get("agent_pid")
+    for row in rows:
+        mark = "*" if row.get("self") or row.get("pid") == agent_pid else " "
+        print(f"{mark} {row.get('pid', ''):<8}{row.get('ppid', ''):<8}{row.get('name', '')}")
+    if res.get("truncated"):
+        print(f"  (showing {len(rows)} of {res.get('count')}; narrow with --name or --pid)")
+    if agent_pid is not None:
+        print(f"  (* = wlt agent, pid {agent_pid}; wlt kill refuses this pid)")
+
+
+def cmd_kill(args):
+    res = api("POST", "/kill", {"pid": args.pid})
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        if not res.get("ok"):
+            sys.exit(1)
+        return
+    if not res.get("ok"):
+        die(f"{res.get('error_code')}: {res.get('detail', '')}", 1)
+    tree = ",".join(str(pid) for pid in (res.get("tree") or []))
+    print(f"killed pid {res.get('pid')} ({res.get('name')}) tree={tree}")
+
+
+def cmd_log(args):
+    res = api("POST", "/log", {"source": args.source, "lines": args.lines})
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    for entry in res.get("logs", []):
+        flags = []
+        if entry.get("missing"):
+            flags.append("missing")
+        if entry.get("truncated"):
+            flags.append("truncated")
+        if entry.get("redacted"):
+            flags.append("redacted")
+        suffix = f"  ({', '.join(flags)})" if flags else ""
+        print(f"== {entry.get('file', entry.get('source'))} =={suffix}")
+        text = entry.get("text") or ""
+        if text:
+            print(text)
+        elif entry.get("missing"):
+            print("(no log yet)")
 
 
 def cmd_wait_window(args):
@@ -751,10 +1004,21 @@ def build_parser():
     sub.add_parser("doctor", help="full environment report").set_defaults(fn=cmd_doctor)
 
     pr = sub.add_parser("run", help="run a command on Windows")
-    pr.add_argument("cmd", nargs="+", help="command line")
+    pr.add_argument("cmd", nargs="*", help="command line (argv when --exe is set)")
     pr.add_argument("--shell", choices=["cmd", "powershell"], default=None)
-    pr.add_argument("--timeout", type=float, default=120)
-    pr.add_argument("--cwd", default=None)
+    pr.add_argument("--timeout", type=float, default=120,
+                    help="execution timeout on Windows, in seconds")
+    pr.add_argument("--cwd", default=None, help="working directory on Windows")
+    pr.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="environment override, repeatable; merged over the Windows environment")
+    pr.add_argument("--exe", default=None,
+                    help="run this program directly; remaining args are argv, not a shell line")
+    pr.add_argument("--request-id", dest="request_id", default=None,
+                    help="persistent job id; repeats return the same job (job engine)")
+    pr.add_argument("--no-wait", action="store_true",
+                    help="start a persistent job and return its id immediately")
+    pr.add_argument("--wait", type=float, default=0,
+                    help="client wait when using the job engine; separate from --timeout")
     pr.add_argument("--json", action="store_true")
     pr.set_defaults(fn=cmd_run)
 
@@ -786,11 +1050,13 @@ def build_parser():
     pj = sub.add_parser("job", help="persistent job control")
     jsub = pj.add_subparsers(dest="jcommand", required=True)
     js = jsub.add_parser("start", help="start a job (returns immediately)")
-    js.add_argument("cmd", nargs="+")
+    js.add_argument("cmd", nargs="*")
     js.add_argument("--shell", choices=["cmd", "powershell", "none"])
     js.add_argument("--timeout", type=float, default=120)
     js.add_argument("--wait", type=float, default=0, help="also wait up to N seconds")
     js.add_argument("--cwd", dest="cwd")
+    js.add_argument("--env", action="append", default=[], metavar="K=V")
+    js.add_argument("--exe", default=None, help="run this program; remaining args are argv")
     js.add_argument("--request-id", dest="request_id")
     js.add_argument("--resource")
     js.add_argument("--note")
@@ -865,6 +1131,10 @@ def build_parser():
     pf = sub.add_parser("focus", help="focus a window")
     pf.add_argument("--title"); pf.add_argument("--hwnd")
     pf.set_defaults(fn=cmd_focus)
+    pcl = sub.add_parser("close", help="ask a window to close (WM_CLOSE)")
+    pcl.add_argument("--title", help="substring of the window title")
+    pcl.add_argument("--hwnd", help="decimal window handle; wins over --title")
+    pcl.set_defaults(fn=cmd_close)
     pww = sub.add_parser("wait-window", help="wait for a window title to appear")
     pww.add_argument("title")
     pww.add_argument("--timeout", type=float, default=30)
@@ -898,6 +1168,24 @@ def build_parser():
     po = sub.add_parser("open", help="open a path or URL on Windows")
     po.add_argument("target", nargs="+")
     po.set_defaults(fn=cmd_open)
+
+    # Process table. Window inventory stays on `windows` (what `wl ps` prints).
+    pps = sub.add_parser("proc", help="list Windows processes (not windows)")
+    pps.add_argument("--name", help="case-insensitive substring of the image name")
+    pps.add_argument("--pid", type=int)
+    pps.add_argument("--limit", type=int, default=200)
+    pps.add_argument("--json", action="store_true")
+    pps.set_defaults(fn=cmd_proc)
+    pkill = sub.add_parser("kill", help="end one process tree (never the agent)")
+    pkill.add_argument("pid", type=int)
+    pkill.add_argument("--json", action="store_true")
+    pkill.set_defaults(fn=cmd_kill)
+
+    plog = sub.add_parser("log", help="tail agent and tunnel logs (redacted, bounded)")
+    plog.add_argument("--source", choices=["all", "agent", "control", "user"], default="all")
+    plog.add_argument("--lines", type=int, default=120, help="tail length per file (max 400)")
+    plog.add_argument("--json", action="store_true")
+    plog.set_defaults(fn=cmd_log)
 
     return p
 

@@ -23,15 +23,25 @@
 ```bash
 wlt job start --request-id flash-20261125-001 --resource uart0 --timeout 300 \
   -- "C:\tools\flash.exe" --port COM3 --image fw.bin
+
+# 等价入口：带 --request-id 的 wlt run 走同一个 job 引擎，不会另起语义
+wlt run --request-id flash-20261125-001 --timeout 300 --cwd C:\fw \
+  --env MODE=lab --no-wait -- C:\tools\flash.exe --port COM3
 ```
 
 网络抖断后重发同一 `--request-id`，拿回的是同一个 job，不会重复烧录。
+id 只能是 1–128 位字母、数字、`.`、`_`、`-`（Windows 上它是一个文件名）。
+
+`wlt run` **不带** `--request-id` / `--no-wait` / `--wait` 时仍是同步 `POST /run`。
+这条路径同样接受 `--cwd`、可重复的 `--env K=V`、以及 `--exe PROGRAM -- argv...`
+（直接启动，不再拼进 cmd）。它不会按 request id 去重。这条路径上的 124 表示执行超时，
+被启动的那个进程已经结束。
 
 ## 三个超时严格分离
 
-- **连接**（`WLT_CONNECT_TIMEOUT`，5s）：够不到代理 → 125。
-- **执行**（`--timeout`，120s）：Windows 代理杀进程树 → `TIMEOUT` / `TIMEOUT_KILLED`。
-- **客户端等待**（`--wait`）：等不到 → 124，任务仍在跑。
+- **连接**：连不上代理 → 125（连接失败立刻返回，不是执行超时）。
+- **执行**（`--timeout`，默认 120s）：job 路径杀掉进程树 → `TIMEOUT` / `TIMEOUT_KILLED`。同步 `wlt run` 只结束它启动的那个进程。
+- **客户端等待**（job 的 `--wait`；不写时是执行超时 + `WLT_WAIT_MARGIN`，默认 30s）：等不到 → 124，任务仍在跑。
 
 ## 持久化任务与有界输出
 
@@ -65,13 +75,22 @@ wlt batch --file plan.json
 wlt shot --monitor 0 --out screen.png   # 多显示器截图
 wlt windows --json                      # 窗口含 PID + 进程名 + 矩形，便于定位
 wlt focus --title "厂商上位机"
+wlt close --title "厂商上位机"           # WM_CLOSE；窗口可以拒绝，这不是杀进程
 wlt wait-window "烧录完成" --timeout 120  # 轮询等待
+wlt proc --name flash --json            # 进程表（不是窗口列表）
+wlt kill 4321                           # 只结束这个 pid 的进程树
 wlt click 500 300 ; wlt type "hello" ; wlt key ctrl+s
 wlt copy                                # 读剪贴板
 wlt http http://127.0.0.1:9000/api      # 访问 Windows 本机服务
+wlt log --source agent --lines 80      # 排障；尾部有界，令牌会打码
 ```
 
 截图在锁屏时会是黑的；图形操作要求会话解锁。
+
+`wlt proc` 是进程表。参考项目的 `wl ps` 列的是窗口，那一份能力在这里是 `wlt windows`。
+`wlt kill` 拒绝 agent 自身、它的祖先、以及树里含有 agent 或系统关键进程的目标；
+403 是政策拒绝，不要换一条更宽的命令再试。需要停掉自己启动的任务时，优先
+`wlt job cancel <id>`（只杀该任务自己的进程树）。
 
 ## 隧道管理（让 Windows 访问 Linux）
 

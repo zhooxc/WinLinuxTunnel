@@ -6,7 +6,7 @@ Semantics inherited from WinLinuxBridge (MIT, see NOTICE):
     stderr.log under <root>/<job_id>/. Survives client timeout, tunnel drop,
     agent restart (the latter marks orphaned RUNNING jobs LOST, never fake-running).
   * request_id dedup: the same request_id returns the original job (retry-safe,
-    "won't flash the board twice").
+    "won't flash the board twice"). The id is one safe filename segment.
   * Execution timeout kills the process TREE and reports TIMEOUT_KILLED.
   * Output streams to disk with a 32 MB cap enforced WHILE running; the API
     returns only a bounded summary + byte count + SHA-256. Byte-cursor reads.
@@ -24,6 +24,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -38,6 +39,20 @@ RESOURCE_WAIT_TIMEOUT = float(os.environ.get("WLT_RESOURCE_WAIT_TIMEOUT", "600")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 TERMINAL = {"SUCCEEDED", "FAILED", "TIMEOUT", "CANCELLED", "LOST", "SPAWN_ERROR"}
+
+# request_id is a filename under jobs/requests/. Keep it a single path segment.
+# The Linux CLI repeats this rule; both copies are covered by the same tests.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def request_id_error(request_id):
+    """None when empty or safe. A message when the id could escape the jobs dir."""
+    if not request_id:
+        return None
+    if request_id in (".", "..") or not _REQUEST_ID_RE.fullmatch(request_id):
+        return ("request_id must be 1-128 chars of letters, digits, '.', '_', '-' "
+                "and must not contain a path separator")
+    return None
 
 
 def now_iso():
@@ -227,6 +242,9 @@ class JobManager:
 
     def start(self, payload):
         request_id = str(payload.get("request_id") or "").strip()
+        err = request_id_error(request_id)
+        if err:
+            raise ValueError(err)
         with self._lock:
             if request_id:
                 existing = self._lookup_request(request_id)
