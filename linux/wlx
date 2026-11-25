@@ -1,0 +1,911 @@
+#!/usr/bin/env python3
+"""wlx command line (Linux side) - single-file, standard library only.
+
+The Windows host dials out and opens a reverse tunnel, so this machine only
+talks to http://127.0.0.1:<WLX_TUNNEL_PORT>. Nothing listens on the network
+here and no root/sudo is used.
+
+This file is ALSO the authoritative rule validator and the only place that
+rewrites the tunnel key's authorized_keys options. The Windows GUI/agent
+pushes rule sets here via `wlx tunnel import` (over the management key) so
+validation logic exists exactly once.
+
+Config:  $WLX_HOME/bridge.env  (default ~/.wlx/bridge.env, mode 0600)
+  WLX_AGENT_TOKEN   bearer token
+  WLX_TUNNEL_PORT   local end of the control tunnel (default 18081)
+Rule store: $WLX_HOME/tunnels.json   (source of truth)
+SSH dir:    $WLX_SSH_DIR (default ~/.ssh)
+
+Python 3.8+. ASCII comments.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+VERSION = "0.1.0"
+
+# Force UTF-8 output regardless of console locale (avoids mojibake on Windows
+# GBK consoles; Linux terminals are already UTF-8).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+HOME = Path(os.environ.get("WLX_HOME", str(Path.home() / ".wlx")))
+SSH_DIR = Path(os.environ.get("WLX_SSH_DIR", str(Path.home() / ".ssh")))
+ENV_FILE = HOME / "bridge.env"
+RULES_FILE = HOME / "tunnels.json"
+AUDIT_FILE = HOME / "tunnels.audit.jsonl"
+TUNNEL_PUB = HOME / "tunnel_ed25519.pub"
+AK_FILE = SSH_DIR / "authorized_keys"
+
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+# --------------------------------------------------------------------------
+# Config & HTTP
+# --------------------------------------------------------------------------
+
+def load_env():
+    conf = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip().replace("\r", "")
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            conf[k.strip()] = v.strip()
+    for k in ("WLX_AGENT_TOKEN", "WLX_TUNNEL_PORT", "WLX_AGENT_PORT", "WLX_CONNECT_PORT"):
+        if os.environ.get(k):
+            conf[k] = os.environ[k]
+    return conf
+
+
+CONF = load_env()
+# Connection port: normally the Linux end of the control tunnel (WLX_TUNNEL_PORT).
+# WLX_CONNECT_PORT overrides it for direct local debugging (talk to the agent
+# port without a tunnel). The CONTROL port identity stays WLX_TUNNEL_PORT so
+# reserved-port validation and permitlisten are correct regardless.
+PORT = CONF.get("WLX_CONNECT_PORT", CONF.get("WLX_TUNNEL_PORT", "18081"))
+BASE = f"http://127.0.0.1:{PORT}"
+TOKEN = CONF.get("WLX_AGENT_TOKEN", "")
+TIMEOUT = float(os.environ.get("WLX_TIMEOUT", "120"))
+
+
+def die(msg, code=1):
+    print(f"wlx: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def api(method, path, body=None):
+    """Call the agent. Returns parsed JSON. Exit 125 when unreachable."""
+    url = BASE + path
+    data = None
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(raw)
+        except ValueError:
+            detail = {"error": raw}
+        die(f"{path}: HTTP {exc.code}: {detail.get('error', '')} {detail.get('detail', '')}", 2)
+    except urllib.error.URLError as exc:
+        die(f"cannot reach {BASE} ({exc.reason}) - is the Windows side running? try: wlx status", 125)
+    except socket.timeout:
+        die(f"request to {BASE} timed out after {TIMEOUT}s", 124)
+
+
+# --------------------------------------------------------------------------
+# Rule model & validation (authoritative)
+# --------------------------------------------------------------------------
+
+def norm_hostport(s, default_host="127.0.0.1"):
+    """Normalize '3080' / 'host:3080' -> 'host:3080'. Raises ValueError."""
+    s = str(s).strip()
+    if not s:
+        raise ValueError("empty host:port")
+    if ":" in s:
+        host, port = s.rsplit(":", 1)
+        host = host or default_host
+    else:
+        host, port = default_host, s
+    if not re.fullmatch(r"[A-Za-z0-9_.\-]+", host):
+        raise ValueError(f"bad host: {host}")
+    if not port.isdigit() or not (1 <= int(port) <= 65535):
+        raise ValueError(f"bad port: {port}")
+    return f"{host}:{port}"
+
+
+def is_loopback(hostport):
+    return hostport.rsplit(":", 1)[0] in LOOPBACK
+
+
+def validate_rules(rules, control_port):
+    """Validate + normalize a full rule list. Raises ValueError with a clear
+    message. Returns the normalized list."""
+    if not isinstance(rules, list):
+        raise ValueError("rules must be a list")
+    seen_ids = set()
+    seen_listen = set()
+    out = []
+    for i, r in enumerate(rules):
+        if not isinstance(r, dict):
+            raise ValueError(f"rule #{i}: must be an object")
+        rid = str(r.get("id") or "").strip()
+        if not rid:
+            raise ValueError(f"rule #{i}: missing id")
+        if rid in seen_ids:
+            raise ValueError(f"duplicate rule id: {rid}")
+        seen_ids.add(rid)
+        d = r.get("dir")
+        if d not in ("L", "R"):
+            raise ValueError(f"rule {rid}: dir must be 'L' or 'R'")
+        try:
+            listen = norm_hostport(r.get("listen", ""))
+            target = norm_hostport(r.get("target", ""))
+        except ValueError as exc:
+            raise ValueError(f"rule {rid}: {exc}")
+        if d == "R" and listen.rsplit(":", 1)[1] == str(control_port):
+            raise ValueError(f"rule {rid}: listen port {control_port} is reserved for the control tunnel")
+        key = (d, listen)
+        if key in seen_listen:
+            raise ValueError(f"rule {rid}: duplicate {d} listen {listen}")
+        seen_listen.add(key)
+        if not is_loopback(listen) and not r.get("lan"):
+            raise ValueError(f"rule {rid}: non-loopback listen {listen} needs --lan (explicit opt-in)")
+        out.append({
+            "id": rid, "dir": d, "listen": listen, "target": target,
+            "enabled": bool(r.get("enabled", True)),
+            "lan": bool(r.get("lan", False)),
+            "note": str(r.get("note", "")),
+        })
+    return out
+
+
+def load_store():
+    if RULES_FILE.exists():
+        try:
+            return json.loads(RULES_FILE.read_text(encoding="utf-8")).get("rules", [])
+        except (OSError, ValueError):
+            die(f"corrupt rule store: {RULES_FILE}")
+    return []
+
+
+def save_store(rules):
+    HOME.mkdir(parents=True, exist_ok=True)
+    tmp = RULES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"version": 1, "rules": rules}, indent=2, ensure_ascii=False),
+                   encoding="utf-8")
+    os.replace(tmp, RULES_FILE)
+    try:
+        os.chmod(RULES_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def audit(action, rules, source="cli"):
+    try:
+        HOME.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                 "action": action, "source": source,
+                                 "ids": [r.get("id") for r in rules]}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# authorized_keys rewrite (the security core)
+# --------------------------------------------------------------------------
+
+def tunnel_pub_blob():
+    if not TUNNEL_PUB.exists():
+        die(f"tunnel public key missing: {TUNNEL_PUB} - run the installer first")
+    parts = TUNNEL_PUB.read_text(encoding="utf-8").split()
+    if len(parts) < 2:
+        die(f"malformed tunnel public key: {TUNNEL_PUB}")
+    return parts[0], parts[1]  # keytype, base64 blob
+
+
+def build_ak_options(rules, control_port):
+    """restrict,port-forwarding + paired permitlisten/permitopen lists.
+
+    HARD CONSTRAINTS (verified against OpenSSH semantics):
+      * permitopen scopes -L targets; permitlisten scopes -R listens.
+      * restrict,port-forwarding opens BOTH directions, so BOTH lists must
+        always be present or the unlisted direction is wide open.
+      * 'restrict' must come first.
+      * With no -L rules, a dummy permitopen (discard port 9) seals that side.
+    """
+    listens = [f"127.0.0.1:{control_port}"]   # control tunnel always allowed
+    opens = []
+    for r in rules:
+        if not r.get("enabled", True):
+            continue
+        if r["dir"] == "R":
+            listens.append(r["listen"])
+        else:
+            opens.append(r["target"])
+    if not opens:
+        opens.append("127.0.0.1:9")           # dummy: seal -L direction
+    # de-dup, preserve order
+    listens = list(dict.fromkeys(listens))
+    opens = list(dict.fromkeys(opens))
+    opts = ["restrict", "port-forwarding"]
+    opts += [f'permitlisten="{x}"' for x in listens]
+    opts += [f'permitopen="{x}"' for x in opens]
+    return ",".join(opts)
+
+
+def rewrite_authorized_keys(rules, control_port):
+    """Replace the options on the tunnel key line; leave all other lines be.
+    Atomic write, mode 0600."""
+    keytype, blob = tunnel_pub_blob()
+    opts = build_ak_options(rules, control_port)
+    new_line = f"{opts} {keytype} {blob} wlx-tunnel"
+    lines = []
+    if AK_FILE.exists():
+        lines = AK_FILE.read_text(encoding="utf-8").splitlines()
+    found = False
+    for i, ln in enumerate(lines):
+        # The key blob is the unique anchor; options/comment may vary.
+        if blob in ln.split():
+            lines[i] = new_line
+            found = True
+    if not found:
+        lines.append(new_line)
+    SSH_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = AK_FILE.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, AK_FILE)
+    try:
+        os.chmod(AK_FILE, 0o600)
+        os.chmod(SSH_DIR, 0o700)
+    except OSError:
+        pass
+    return opts
+
+
+def apply_to_windows(rules):
+    """Push the rule set to the agent (it restarts the user tunnel)."""
+    return api("POST", "/tunnels/apply", {"rules": rules})
+
+
+def commit_rules(rules, action, source="cli", push=True):
+    """Validate -> persist -> rewrite authorized_keys -> audit -> push."""
+    control_port = CONF.get("WLX_TUNNEL_PORT", "18081")
+    rules = validate_rules(rules, control_port)
+    save_store(rules)
+    opts = rewrite_authorized_keys(rules, control_port)
+    audit(action, rules, source)
+    result = apply_to_windows(rules) if push else {"ok": True, "pushed": False}
+    return rules, opts, result
+
+
+# --------------------------------------------------------------------------
+# Output helpers
+# --------------------------------------------------------------------------
+
+def print_rule_table(states):
+    if not states:
+        print("  (no rules)")
+        return
+    print(f"  {'ID':<14}{'DIR':<5}{'LISTEN':<24}{'TARGET':<24}{'STATE':<7}NOTE")
+    for r in states:
+        print(f"  {r.get('id',''):<14}{r.get('dir',''):<5}"
+              f"{r.get('listen',''):<24}{r.get('target',''):<24}"
+              f"{r.get('state','?'):<7}{r.get('note','')}")
+
+
+def show_apply_result(result):
+    if not result.get("ok"):
+        print(f"wlx: apply reported a problem: {result.get('error') or result.get('note','')}",
+              file=sys.stderr)
+    print_rule_table(result.get("rules", []))
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+def cmd_ping(_):
+    print(json.dumps(api("GET", "/ping"), indent=2, ensure_ascii=False))
+
+
+def cmd_status(_):
+    ping = api("GET", "/ping")
+    st = api("GET", "/tunnels/status")
+    print(f"agent   : ok  v{ping.get('version')}  host={ping.get('host')}  user={ping.get('user')}")
+    c = st.get("control", {})
+    u = st.get("user", {})
+    print(f"control : {'UP' if c.get('alive') else 'DOWN'}  "
+          f"forwards={','.join(c.get('forwards', []))}  "
+          f"{('err: ' + c['last_error']) if c.get('last_error') else ''}")
+    print(f"user    : {'UP' if u.get('alive') else 'DOWN'}  "
+          f"{('err: ' + u['last_error']) if u.get('last_error') else ''}")
+    local = load_store()
+    lh = hashlib.sha256(json.dumps(local, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+    if lh != st.get("rules_hash"):
+        print(f"rules   : DRIFT (local {lh} != windows {st.get('rules_hash')}) - run: wlx tunnel sync")
+    else:
+        print(f"rules   : in sync ({lh})")
+    print_rule_table(st.get("rules", []))
+
+
+def cmd_doctor(_):
+    print(json.dumps(api("GET", "/doctor"), indent=2, ensure_ascii=False))
+
+
+def cmd_run(args):
+    body = {"cmd": " ".join(args.cmd), "timeout": args.timeout}
+    if args.shell:
+        body["shell"] = args.shell
+    if args.cwd:
+        body["cwd"] = args.cwd
+    res = api("POST", "/run", body)
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    if not res.get("ok"):
+        die(f"{res.get('error_code')}: {res.get('detail', '')}", 126)
+    if res.get("out"):
+        sys.stdout.write(res["out"])
+        if not res["out"].endswith("\n"):
+            sys.stdout.write("\n")
+    if res.get("err"):
+        sys.stderr.write(res["err"])
+    if res.get("timed_out"):
+        die(f"command timed out after {args.timeout}s (process killed)", 124)
+    rc = res.get("rc")
+    sys.exit(0 if rc == 0 else (rc or 1))
+
+
+def cmd_tunnel_add(args):
+    rules = load_store()
+    rid = args.id or f"{args.dir.lower()}{norm_hostport(args.listen).rsplit(':',1)[1]}"
+    rules.append({
+        "id": rid, "dir": args.dir.upper(), "listen": args.listen,
+        "target": args.target, "enabled": True, "lan": args.lan, "note": args.note or "",
+    })
+    try:
+        rules, opts, result = commit_rules(rules, "add")
+    except ValueError as exc:
+        die(str(exc), 2)
+    print(f"added rule '{rid}'")
+    show_apply_result(result)
+
+
+def cmd_tunnel_list(_):
+    st = api("GET", "/tunnels/status")
+    print_rule_table(st.get("rules", []))
+
+
+def _mutate(args, action, fn):
+    rules = load_store()
+    found = False
+    for r in rules:
+        if r.get("id") == args.id:
+            fn(r)
+            found = True
+    if not found:
+        die(f"no such rule: {args.id}", 2)
+    if action == "rm":
+        rules = [r for r in rules if r.get("id") != args.id]
+    try:
+        rules, opts, result = commit_rules(rules, action)
+    except ValueError as exc:
+        die(str(exc), 2)
+    print(f"{action}: {args.id}")
+    show_apply_result(result)
+
+
+def cmd_tunnel_on(args):
+    _mutate(args, "on", lambda r: r.update(enabled=True))
+
+
+def cmd_tunnel_off(args):
+    _mutate(args, "off", lambda r: r.update(enabled=False))
+
+
+def cmd_tunnel_rm(args):
+    _mutate(args, "rm", lambda r: None)
+
+
+def cmd_tunnel_sync(_):
+    rules = load_store()
+    try:
+        rules, opts, result = commit_rules(rules, "sync")
+    except ValueError as exc:
+        die(str(exc), 2)
+    print("synced rule store -> authorized_keys -> Windows")
+    show_apply_result(result)
+
+
+def cmd_tunnel_import(_):
+    """Receive a full rule set on stdin (called by Windows over the mgmt key).
+    Validates + persists + rewrites authorized_keys. Does NOT push back."""
+    try:
+        data = json.loads(sys.stdin.read())
+    except ValueError as exc:
+        die(f"import: bad JSON: {exc}", 2)
+    rules = data.get("rules", data if isinstance(data, list) else [])
+    try:
+        rules, opts, _ = commit_rules(rules, "import", source="gui", push=False)
+    except ValueError as exc:
+        die(f"import: {exc}", 2)
+    print(json.dumps({"ok": True, "count": len(rules),
+                      "hash": hashlib.sha256(
+                          json.dumps(rules, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]}))
+
+
+def cmd_tunnel_probe(args):
+    rules = load_store()
+    r = next((x for x in rules if x.get("id") == args.id), None)
+    if not r:
+        die(f"no such rule: {args.id}", 2)
+    if r["dir"] == "R":
+        # listen is on Linux: connecting exercises the full tunnel to Windows.
+        host, port = r["listen"].rsplit(":", 1)
+        label = f"end-to-end via Linux listen {r['listen']}"
+    else:
+        # listen is on Windows; from Linux we can only check the target service.
+        host, port = r["target"].rsplit(":", 1)
+        label = f"target-side check {r['target']} (tunnel listen is on Windows)"
+    try:
+        with socket.create_connection((host, int(port)), timeout=5):
+            print(f"probe {args.id}: OK  ({label})")
+    except OSError as exc:
+        die(f"probe {args.id}: FAIL  ({label}): {exc}", 1)
+
+
+# --------------------------------------------------------------------------
+# Jobs
+# --------------------------------------------------------------------------
+
+def cmd_job_start(args):
+    body = {"cmd": " ".join(args.cmd), "timeout": args.timeout}
+    for k in ("shell", "cwd", "request_id", "resource", "note"):
+        v = getattr(args, k, None)
+        if v:
+            body[k] = v
+    res = api("POST", "/job/start", body)
+    if not res.get("ok"):
+        die(f"{res.get('error_code')}: {res.get('detail', '')}", 126)
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    print(f"job {res.get('id')}  state={res.get('state')}"
+          + ("  (dedup: existing job returned)" if res.get("dedup") else ""))
+    if args.wait and args.wait > 0:
+        st = api("POST", "/job/status", {"job_id": res["id"], "wait": args.wait})
+        _exit_for_job(st)
+
+
+def _exit_for_job(st):
+    state = st.get("state")
+    print(f"job {st.get('id')}  state={state}  exit_code={st.get('exit_code')}  "
+          f"error={st.get('error_code')}")
+    if state in ("QUEUED", "RUNNING"):
+        die("client wait expired; job still running (state unknown, NOT a failure)", 124)
+    if state == "CANCELLED":
+        sys.exit(130)
+    if state in ("LOST", "SPAWN_ERROR"):
+        sys.exit(126)
+    if state == "TIMEOUT":
+        sys.exit(124)
+    rc = st.get("exit_code")
+    sys.exit(0 if rc == 0 else (rc or 1))
+
+
+def cmd_job_status(args):
+    st = api("POST", "/job/status", {"job_id": args.id, "wait": args.wait})
+    if args.json:
+        print(json.dumps(st, indent=2, ensure_ascii=False))
+        return
+    _exit_for_job(st)
+
+
+def cmd_job_logs(args):
+    res = api("POST", "/job/logs", {"job_id": args.id, "which": args.which,
+                                    "since": args.since, "limit": args.limit})
+    sys.stdout.write(res.get("text", ""))
+    print(f"\n[since={res.get('since')} next={res.get('next')} total={res.get('total')}]",
+          file=sys.stderr)
+
+
+def cmd_job_result(args):
+    res = api("POST", "/job/result", {"job_id": args.id})
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+    print(f"job {res.get('id')}  state={res.get('state')}  exit_code={res.get('exit_code')}")
+    for which in ("stdout", "stderr"):
+        s = res.get(which, {})
+        print(f"--- {which} ({s.get('bytes')} bytes, sha256={s.get('sha256','')[:16]}...) ---")
+        if s.get("text"):
+            print(s["text"])
+
+
+def cmd_job_cancel(args):
+    res = api("POST", "/job/cancel", {"job_id": args.id, "note": args.note or ""})
+    print(f"job {res.get('id')}  state={res.get('state')}  kill_rc={res.get('cancel_kill_rc')}")
+
+
+def cmd_job_list(args):
+    res = api("POST", "/job/list", {"limit": args.limit})
+    print(f"  {'ID':<14}{'STATE':<13}{'RC':<5}{'CREATED':<21}CMD")
+    for j in res.get("jobs", []):
+        cmd = " ".join(j.get("argv", []))[:50]
+        print(f"  {j.get('id',''):<14}{j.get('state',''):<13}"
+              f"{str(j.get('exit_code','')):<5}{j.get('created',''):<21}{cmd}")
+
+
+def cmd_job_stats(_):
+    print(json.dumps(api("POST", "/job/stats", {}), indent=2, ensure_ascii=False))
+
+
+def cmd_batch(args):
+    """Run a plan file sequentially; stop on first failure. Resource keys are
+    enforced agent-side, so concurrent batches sharing a resource serialize."""
+    plan = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    steps = plan.get("steps", [])
+    for i, step in enumerate(steps):
+        body = dict(step)
+        body.setdefault("timeout", args.timeout)
+        res = api("POST", "/job/start", body)
+        if not res.get("ok"):
+            die(f"step {i}: {res.get('error_code')}: {res.get('detail','')}", 126)
+        jid = res["id"]
+        print(f"[{i+1}/{len(steps)}] job {jid} started")
+        st = api("POST", "/job/status", {"job_id": jid, "wait": args.timeout + 30})
+        if st.get("state") != "SUCCEEDED":
+            die(f"step {i} (job {jid}) ended {st.get('state')} "
+                f"exit={st.get('exit_code')} error={st.get('error_code')}", 1)
+    print(f"batch complete: {len(steps)} step(s) succeeded")
+
+
+# --------------------------------------------------------------------------
+# Desktop
+# --------------------------------------------------------------------------
+
+def cmd_shot(args):
+    body = {"mode": "b64"}
+    if args.monitor is not None:
+        body["monitor"] = args.monitor
+    if args.region:
+        body["region"] = [int(v) for v in args.region.split(",")]
+    if args.window:
+        body["window"] = args.window
+    res = api("POST", "/screenshot", body)
+    if args.path_only:
+        print(f"{res.get('path')}  {res.get('width')}x{res.get('height')}  {res.get('size')} bytes")
+        return
+    import base64
+    out = args.out or f"wlx-shot-{time.strftime('%Y%m%d_%H%M%S')}.png"
+    Path(out).write_bytes(base64.b64decode(res.get("b64", "")))
+    print(f"saved {out}  ({res.get('width')}x{res.get('height')}, {res.get('size')} bytes)")
+    if res.get("warning"):
+        print(f"warning: {res['warning']}", file=sys.stderr)
+
+
+def cmd_monitors(_):
+    res = api("GET", "/monitors")
+    for m in res.get("monitors", []):
+        print(f"  [{m['index']}] {'primary' if m.get('primary') else '       '} "
+              f"{m.get('device','')}  rect={m.get('rect')}")
+
+
+def _input(body):
+    res = api("POST", "/input", body)
+    print(json.dumps(res, ensure_ascii=False))
+
+
+def cmd_click(args):
+    action = "double_click" if args.double else "right_click" if args.right else \
+             "middle_click" if args.middle else "click"
+    _input({"action": action, "x": args.x, "y": args.y})
+
+
+def cmd_move(args):
+    _input({"action": "move", "x": args.x, "y": args.y})
+
+
+def cmd_type(args):
+    _input({"action": "type", "text": " ".join(args.text)})
+
+
+def cmd_key(args):
+    _input({"action": "key", "combo": args.combo, "repeat": args.repeat})
+
+
+def cmd_scroll(args):
+    _input({"action": "wheel", "delta": args.delta})
+
+
+def cmd_drag(args):
+    _input({"action": "drag", "x1": args.x1, "y1": args.y1, "x2": args.x2, "y2": args.y2})
+
+
+def cmd_windows(args):
+    res = api("GET", "/windows")
+    wins = res.get("windows", [])
+    if args.json:
+        print(json.dumps(wins, indent=2, ensure_ascii=False))
+        return
+    print(f"  {'HWND':<12}{'PID':<8}{'PROCESS':<24}TITLE")
+    for w in wins:
+        print(f"  {w.get('hwnd',''):<12}{w.get('pid',''):<8}"
+              f"{w.get('process','')[:22]:<24}{w.get('title','')[:60]}")
+
+
+def cmd_focus(args):
+    body = {"action": "focus"}
+    if args.hwnd:
+        body["hwnd"] = args.hwnd
+    elif args.title:
+        body["title"] = args.title
+    else:
+        die("provide --title or --hwnd", 2)
+    print(json.dumps(api("POST", "/window", body), ensure_ascii=False))
+
+
+def cmd_wait_window(args):
+    res = api("POST", "/wait-window", {"title": args.title, "timeout": args.timeout})
+    if res.get("found"):
+        print(f"found: {res['window'].get('title')} (hwnd={res['window'].get('hwnd')})")
+    else:
+        die(f"no window matching '{args.title}' within {args.timeout}s", 1)
+
+
+def cmd_copy(_):
+    res = api("POST", "/clipboard", {"op": "get"})
+    sys.stdout.write(res.get("text", ""))
+
+
+def cmd_paste(args):
+    res = api("POST", "/clipboard", {"op": "set", "text": " ".join(args.text)})
+    print(f"clipboard set ({res.get('length')} chars)")
+
+
+def cmd_http(args):
+    body = {"url": args.url, "method": args.method}
+    if args.body:
+        body["body"] = args.body
+    if args.header:
+        body["headers"] = dict(h.split(":", 1) for h in args.header)
+    res = api("POST", "/http", body)
+    print(f"HTTP {res.get('status')}  ({res.get('size')} bytes)")
+    if res.get("text") is not None:
+        print(res["text"])
+    else:
+        print(f"[binary, b64 {len(res.get('b64',''))} chars]")
+
+
+# --------------------------------------------------------------------------
+# Files
+# --------------------------------------------------------------------------
+
+def cmd_ls(args):
+    res = api("POST", "/fs", {"op": "list", "path": args.path or "."})
+    print(f"{res.get('path')}  ({res.get('count')} entries)")
+    for e in res.get("entries", []):
+        print(f"  {e['type']:<5}{e['size']:>12}  {e['mtime']}  {e['name']}")
+
+
+def cmd_get(args):
+    import base64
+    res = api("POST", "/file", {"path": args.remote})
+    local = args.local or Path(args.remote.replace("\\", "/")).name
+    Path(local).write_bytes(base64.b64decode(res.get("b64", "")))
+    print(f"got {res.get('path')} -> {local}  ({res.get('size')} bytes)")
+
+
+def cmd_put(args):
+    import base64
+    raw = Path(args.local).read_bytes()
+    remote = args.remote or Path(args.local).name
+    res = api("POST", "/fs", {"op": "write", "path": remote,
+                              "b64": base64.b64encode(raw).decode("ascii")})
+    print(f"put {args.local} -> {res.get('path')}  ({res.get('size')} bytes)")
+
+
+def cmd_rm(args):
+    res = api("POST", "/fs", {"op": "rm", "path": args.path, "recursive": args.recursive})
+    print(f"removed {res.get('path')}")
+
+
+def cmd_open(args):
+    target = " ".join(args.target)
+    res = api("POST", "/run", {"cmd": f'start "" "{target}"', "timeout": 15})
+    print(f"opened: {target}  (rc={res.get('rc')})")
+
+
+# --------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="wlx", description="wlx - Linux terminal -> Windows desktop + tunnels")
+    p.add_argument("--version", action="version", version=f"wlx {VERSION}")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("ping", help="agent identity").set_defaults(fn=cmd_ping)
+    sub.add_parser("status", help="tunnel / agent / rule health").set_defaults(fn=cmd_status)
+    sub.add_parser("doctor", help="full environment report").set_defaults(fn=cmd_doctor)
+
+    pr = sub.add_parser("run", help="run a command on Windows")
+    pr.add_argument("cmd", nargs="+", help="command line")
+    pr.add_argument("--shell", choices=["cmd", "powershell"], default=None)
+    pr.add_argument("--timeout", type=float, default=120)
+    pr.add_argument("--cwd", default=None)
+    pr.add_argument("--json", action="store_true")
+    pr.set_defaults(fn=cmd_run)
+
+    pt = sub.add_parser("tunnel", help="manage bidirectional tunnel rules")
+    tsub = pt.add_subparsers(dest="tcommand", required=True)
+
+    pa = tsub.add_parser("add", help="add a rule: add L|R <listen> <target>")
+    pa.add_argument("dir", choices=["L", "R", "l", "r"])
+    pa.add_argument("listen", help="listen port or host:port (on Windows for L, on Linux for R)")
+    pa.add_argument("target", help="target host:port (resolved from Linux for L, from Windows for R)")
+    pa.add_argument("--id", default=None)
+    pa.add_argument("--note", default=None)
+    pa.add_argument("--lan", action="store_true", help="allow non-loopback listen")
+    pa.set_defaults(fn=cmd_tunnel_add)
+
+    tsub.add_parser("list", help="list rules with live state").set_defaults(fn=cmd_tunnel_list)
+    tsub.add_parser("sync", help="push source of truth to Windows").set_defaults(fn=cmd_tunnel_sync)
+    tsub.add_parser("import", help="import rule set from stdin (Windows use)").set_defaults(fn=cmd_tunnel_import)
+
+    for name, fn, hlp in (("on", cmd_tunnel_on, "enable a rule"),
+                          ("off", cmd_tunnel_off, "disable a rule"),
+                          ("rm", cmd_tunnel_rm, "remove a rule"),
+                          ("probe", cmd_tunnel_probe, "probe a rule end-to-end")):
+        sp = tsub.add_parser(name, help=hlp)
+        sp.add_argument("id")
+        sp.set_defaults(fn=fn)
+
+    # -- jobs --------------------------------------------------------------
+    pj = sub.add_parser("job", help="persistent job control")
+    jsub = pj.add_subparsers(dest="jcommand", required=True)
+    js = jsub.add_parser("start", help="start a job (returns immediately)")
+    js.add_argument("cmd", nargs="+")
+    js.add_argument("--shell", choices=["cmd", "powershell", "none"])
+    js.add_argument("--timeout", type=float, default=120)
+    js.add_argument("--wait", type=float, default=0, help="also wait up to N seconds")
+    js.add_argument("--cwd", dest="cwd")
+    js.add_argument("--request-id", dest="request_id")
+    js.add_argument("--resource")
+    js.add_argument("--note")
+    js.add_argument("--json", action="store_true")
+    js.set_defaults(fn=cmd_job_start)
+    jt = jsub.add_parser("status", help="job state (optionally wait)")
+    jt.add_argument("id")
+    jt.add_argument("--wait", type=float, default=0)
+    jt.add_argument("--json", action="store_true")
+    jt.set_defaults(fn=cmd_job_status)
+    jl = jsub.add_parser("logs", help="read job output by byte cursor")
+    jl.add_argument("id")
+    jl.add_argument("--which", choices=["stdout", "stderr"], default="stdout")
+    jl.add_argument("--since", type=int, default=0)
+    jl.add_argument("--limit", type=int, default=65536)
+    jl.set_defaults(fn=cmd_job_logs)
+    jr = jsub.add_parser("result", help="bounded summary + sha256")
+    jr.add_argument("id")
+    jr.add_argument("--json", action="store_true")
+    jr.set_defaults(fn=cmd_job_result)
+    jc = jsub.add_parser("cancel", help="kill the job's process tree")
+    jc.add_argument("id")
+    jc.add_argument("--note")
+    jc.set_defaults(fn=cmd_job_cancel)
+    jls = jsub.add_parser("list", help="list recent jobs")
+    jls.add_argument("--limit", type=int, default=50)
+    jls.set_defaults(fn=cmd_job_list)
+    jsub.add_parser("stats", help="job statistics").set_defaults(fn=cmd_job_stats)
+
+    pb = sub.add_parser("batch", help="run a plan file sequentially")
+    pb.add_argument("--file", required=True)
+    pb.add_argument("--timeout", type=float, default=120)
+    pb.set_defaults(fn=cmd_batch)
+
+    # -- desktop -----------------------------------------------------------
+    ps = sub.add_parser("shot", help="screenshot (saved locally by default)")
+    ps.add_argument("--out")
+    ps.add_argument("--monitor", type=int)
+    ps.add_argument("--region", help="x,y,w,h")
+    ps.add_argument("--window", help="hwnd")
+    ps.add_argument("--path-only", action="store_true")
+    ps.set_defaults(fn=cmd_shot)
+    sub.add_parser("monitors", help="list physical monitors").set_defaults(fn=cmd_monitors)
+
+    pc = sub.add_parser("click", help="click at x y")
+    pc.add_argument("x", type=int); pc.add_argument("y", type=int)
+    pc.add_argument("--double", action="store_true")
+    pc.add_argument("--right", action="store_true")
+    pc.add_argument("--middle", action="store_true")
+    pc.set_defaults(fn=cmd_click)
+    pm = sub.add_parser("move", help="move cursor")
+    pm.add_argument("x", type=int); pm.add_argument("y", type=int)
+    pm.set_defaults(fn=cmd_move)
+    pty = sub.add_parser("type", help="type text")
+    pty.add_argument("text", nargs="+")
+    pty.set_defaults(fn=cmd_type)
+    pk = sub.add_parser("key", help="press a key combo, e.g. ctrl+s")
+    pk.add_argument("combo")
+    pk.add_argument("--repeat", type=int, default=1)
+    pk.set_defaults(fn=cmd_key)
+    psc = sub.add_parser("scroll", help="mouse wheel delta (120 = one notch)")
+    psc.add_argument("delta", type=int)
+    psc.set_defaults(fn=cmd_scroll)
+    pd = sub.add_parser("drag", help="drag from x1 y1 to x2 y2")
+    pd.add_argument("x1", type=int); pd.add_argument("y1", type=int)
+    pd.add_argument("x2", type=int); pd.add_argument("y2", type=int)
+    pd.set_defaults(fn=cmd_drag)
+
+    pw = sub.add_parser("windows", help="list visible windows")
+    pw.add_argument("--json", action="store_true")
+    pw.set_defaults(fn=cmd_windows)
+    pf = sub.add_parser("focus", help="focus a window")
+    pf.add_argument("--title"); pf.add_argument("--hwnd")
+    pf.set_defaults(fn=cmd_focus)
+    pww = sub.add_parser("wait-window", help="wait for a window title to appear")
+    pww.add_argument("title")
+    pww.add_argument("--timeout", type=float, default=30)
+    pww.set_defaults(fn=cmd_wait_window)
+
+    sub.add_parser("copy", help="read Windows clipboard").set_defaults(fn=cmd_copy)
+    pp = sub.add_parser("paste", help="set Windows clipboard")
+    pp.add_argument("text", nargs="+")
+    pp.set_defaults(fn=cmd_paste)
+    ph = sub.add_parser("http", help="call a Windows-local HTTP service")
+    ph.add_argument("url")
+    ph.add_argument("--method", default="GET")
+    ph.add_argument("--body")
+    ph.add_argument("--header", action="append")
+    ph.set_defaults(fn=cmd_http)
+
+    # -- files -------------------------------------------------------------
+    pls = sub.add_parser("ls", help="list a Windows directory (whitelisted)")
+    pls.add_argument("path", nargs="?")
+    pls.set_defaults(fn=cmd_ls)
+    pg = sub.add_parser("get", help="pull a Windows file to Linux")
+    pg.add_argument("remote"); pg.add_argument("local", nargs="?")
+    pg.set_defaults(fn=cmd_get)
+    ppu = sub.add_parser("put", help="push a Linux file to Windows")
+    ppu.add_argument("local"); ppu.add_argument("remote", nargs="?")
+    ppu.set_defaults(fn=cmd_put)
+    prm = sub.add_parser("rm", help="remove a Windows file/dir (whitelisted)")
+    prm.add_argument("path")
+    prm.add_argument("--recursive", action="store_true")
+    prm.set_defaults(fn=cmd_rm)
+    po = sub.add_parser("open", help="open a path or URL on Windows")
+    po.add_argument("target", nargs="+")
+    po.set_defaults(fn=cmd_open)
+
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
