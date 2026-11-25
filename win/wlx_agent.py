@@ -37,6 +37,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# The embeddable runtime's ._pth does NOT add the script directory to sys.path
+# (system Python does). Insert it explicitly so sibling modules import under
+# both the bundled runtime and a normal interpreter.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import wlx_desktop as desktop
 from wlx_jobs import JobManager
 
@@ -529,6 +534,45 @@ def run_command(payload):
 
 
 # --------------------------------------------------------------------------
+# Rule sync to Linux (for GUI-originated changes)
+# --------------------------------------------------------------------------
+
+def push_rules_to_linux(conf, rules):
+    """Push a rule set to the Linux source of truth over the management key.
+
+    The Linux CLI (`wlx tunnel import`) is the single authoritative validator
+    and the only writer of authorized_keys. GUI-originated changes MUST go
+    through it, otherwise sshd would refuse the new forwards (permitopen /
+    permitlisten not updated). CLI-originated changes already did this locally
+    and call /tunnels/apply with sync_linux=false.
+    """
+    key = str(KEYS_DIR / "mgmt_ed25519")
+    if not Path(key).exists():
+        return False, "management key missing; cannot sync rules to Linux"
+    host = conf["WLX_LINUX_HOST"]
+    user = conf["WLX_LINUX_USER"]
+    port = conf["WLX_SSH_PORT"]
+    if not host:
+        return False, "WLX_LINUX_HOST not configured"
+    remote_root = conf.get("WLX_REMOTE_ROOT") or "~/wlx"
+    target = f"{user}@{host}" if user else host
+    args = ["ssh", "-i", key, "-p", str(port),
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=10",
+            target, f"{remote_root}/linux/wlx tunnel import"]
+    payload = json.dumps({"rules": rules}, ensure_ascii=False).encode("utf-8")
+    try:
+        r = subprocess.run(args, input=payload, capture_output=True, timeout=30,
+                           creationflags=CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            return False, (r.stderr.decode("utf-8", "replace").strip()
+                           or f"import exit {r.returncode}")
+        return True, r.stdout.decode("utf-8", "replace").strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+
+# --------------------------------------------------------------------------
 # HTTP API
 # --------------------------------------------------------------------------
 
@@ -673,6 +717,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError(f"rule {r.get('id')}: dir must be L or R")
             if not r.get("listen") or not r.get("target"):
                 raise ValueError(f"rule {r.get('id')}: listen/target required")
+        if payload.get("sync_linux"):
+            ok, detail = push_rules_to_linux(self.conf, rules)
+            if not ok:
+                return {"ok": False, "error": f"linux sync failed: {detail}"}
         return self.manager.apply_rules(rules)
 
 

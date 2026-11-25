@@ -1,0 +1,12 @@
+# wlx settings example - NOT used at runtime.
+# Real settings: %USERPROFILE%\.wlx\wlx.conf (written by install-win.ps1 / GUI).
+# No secrets here. The token lives in %USERPROFILE%\.wlx\agent.token (ACL) and
+# the WLX_AGENT_TOKEN user environment variable.
+
+WLX_LINUX_HOST=          # Linux server address (Windows dials out to it)
+WLX_LINUX_USER=          # Linux account (only ~ needed, no sudo)
+WLX_SSH_PORT=22
+WLX_REMOTE_ROOT=         # empty -> ~/wlx on Linux
+WLX_AGENT_PORT=8788      # control agent on 127.0.0.1 (Windows)
+WLX_TUNNEL_PORT=18081    # control tunnel listen port on 127.0.0.1 (Linux)
+WLX_TICK_SECONDS=10      # tunnel watchdog interval
