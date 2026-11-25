@@ -1,0 +1,3 @@
+# Windows build machine only. Not imported by the app at runtime.
+# tools/build-windows.ps1 installs this into .venv-build.
+pyinstaller>=6.0

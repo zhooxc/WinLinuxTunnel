@@ -1,12 +1,16 @@
-# Built runtime & vendored binaries (produced by tools/, shipped in release zip only)
+# Built runtime & vendored binaries (legacy embeddable tree; not the installer)
 win/runtime/
 win/vendor/
 dist/
+build/
+.venv-build/
 *.zip
 
 # Local config & secrets - NEVER commit these
 wlt.conf
 agent.token
+agent.pid
+agent.lock
 bridge.env
 keys/
 *.pem
