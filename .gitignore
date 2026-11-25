@@ -1,0 +1,25 @@
+# Built runtime & vendored binaries (produced by tools/, shipped in release zip only)
+win/runtime/
+win/vendor/
+dist/
+*.zip
+
+# Local config & secrets - NEVER commit these
+wlx.conf
+agent.token
+bridge.env
+keys/
+*.pem
+
+# Runtime state
+jobs/
+logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
