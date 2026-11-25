@@ -1,8 +1,10 @@
-# wlx
+# WinLinuxTunnel
 
 **在 Linux 终端里操作 Windows 桌面 + 任意双向 SSH 隧道 —— 隧道由 Windows 自己发起。**
 
-> **v0.1.0 已发布** · [下载零依赖发布包](https://github.com/zhooxc/wlx/releases/latest) · 完整设计见 [DESIGN.md](DESIGN.md)。
+> 命令行工具名 **`wlt`**。Windows 侧是带系统托盘的中文桌面软件（可最小化到任务栏/通知区域）。
+>
+> **v0.2.0** · [下载零依赖发布包](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) · 完整设计见 [DESIGN.md](DESIGN.md)。
 > 仿照 [WinLinuxBridge](https://github.com/Fatmear/WinLinuxBridge)（MIT）重新实现的轻量级工具，
 > 继承其经过验证的执行语义，新增**规则驱动的任意方向隧道**与**中文图形界面**。
 > 借用代码的归属声明见 [NOTICE](NOTICE)。
@@ -33,14 +35,14 @@
 ```
  Linux 主机（sshd 即服务端，无守护进程）           Windows 桌面（用户态，零安装）
  ─────────────────────────────────────           ──────────────────────────────
- ~/.wlx/                                         %USERPROFILE%\.wlx\
- ├── tunnels.json  规则真相源                    ├── wlx.conf / tunnels.json 镜像
+ ~/.wlt/                                         %USERPROFILE%\.wlt\
+ ├── tunnels.json  规则真相源                    ├── wlt.conf / tunnels.json 镜像
  ├── bridge.env    令牌(0600)                    ├── agent.token (ACL)
  └── authorized_keys 动态 permitopen/permitlisten├── keys\ 两把专用 ed25519
                                                  └── jobs\ 持久化任务
         ▲
         │ ① 控制隧道（固定 -R，独立 ssh 进程）
- wlx run / job / shot ──► 127.0.0.1:18081 ═════► 127.0.0.1:8788  wlx_agent.py
+ wlt run / job / shot ──► 127.0.0.1:18081 ═════► 127.0.0.1:8788  wlt_agent.py
         │                                         ├ HTTP + Bearer 鉴权
         │ ② 用户隧道（规则驱动，独立 ssh 进程）    ├ 持久化 job 引擎
         │   -L 127.0.0.1:3080:127.0.0.1:3080      ├ 隧道管理（看门狗/退避/热应用）
@@ -69,16 +71,16 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/zhooxc/wlx/releases/latest) 下载 `wlx-0.1.0.zip`，**完整解压**（含便携运行时，目标机无需装 Python）。
+1. 从 [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) 下载 `wlt-0.1.0.zip`，**完整解压**（含便携运行时，目标机无需装 Python）。
 2. Windows：双击 `win\start-gui.vbs` → 「配置」页 → 「运行安装向导」，填 Linux 地址/账号，**输入一次 Linux 密码**。
-3. Linux：`~/wlx/linux/wlx status` 开始用（建议 `alias wlx=~/wlx/linux/wlx`）。
+3. Linux：`~/wlt/linux/wlt status` 开始用（建议 `alias wlt=~/wlt/linux/wlt`）。
 
 ```
-wlx status                          # 隧道 / 代理 / 规则健康一览
-wlx run "ipconfig"                  # 在 Windows 上执行命令
-wlx tunnel add L 3080 127.0.0.1:3080   # Windows 访问 Linux 的 3080 服务
-wlx tunnel list                     # 每条规则的实时状态
-wlx shot                            # 截图
+wlt status                          # 隧道 / 代理 / 规则健康一览
+wlt run "ipconfig"                  # 在 Windows 上执行命令
+wlt tunnel add L 3080 127.0.0.1:3080   # Windows 访问 Linux 的 3080 服务
+wlt tunnel list                     # 每条规则的实时状态
+wlt shot                            # 截图
 ```
 
 ## 安全模型
@@ -92,7 +94,7 @@ wlx shot                            # 截图
 
 ## 与 WinLinuxBridge 的关系
 
-wlx 是独立重写，不是 fork。继承其最有价值的部分（持久化任务语义、三超时、
+wlt 是独立重写，不是 fork。继承其最有价值的部分（持久化任务语义、三超时、
 有界输出、双钥安全模型、隧道自愈），新增任意双向隧道与 GUI，砍掉三条同步车道、
 plink 依赖与 PowerShell 常驻体系。默认端口刻意错开（8788/18081 vs 8787/18080），
 **两者可在同一台机器上共存**。详见 [DESIGN.md](DESIGN.md) 与 [NOTICE](NOTICE)。

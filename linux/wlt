@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""wlx command line (Linux side) - single-file, standard library only.
+"""wlt command line (Linux side) - single-file, standard library only.
 
 The Windows host dials out and opens a reverse tunnel, so this machine only
-talks to http://127.0.0.1:<WLX_TUNNEL_PORT>. Nothing listens on the network
+talks to http://127.0.0.1:<WLT_TUNNEL_PORT>. Nothing listens on the network
 here and no root/sudo is used.
 
 This file is ALSO the authoritative rule validator and the only place that
 rewrites the tunnel key's authorized_keys options. The Windows GUI/agent
-pushes rule sets here via `wlx tunnel import` (over the management key) so
+pushes rule sets here via `wlt tunnel import` (over the management key) so
 validation logic exists exactly once.
 
-Config:  $WLX_HOME/bridge.env  (default ~/.wlx/bridge.env, mode 0600)
-  WLX_AGENT_TOKEN   bearer token
-  WLX_TUNNEL_PORT   local end of the control tunnel (default 18081)
-Rule store: $WLX_HOME/tunnels.json   (source of truth)
-SSH dir:    $WLX_SSH_DIR (default ~/.ssh)
+Config:  $WLT_HOME/bridge.env  (default ~/.wlt/bridge.env, mode 0600)
+  WLT_AGENT_TOKEN   bearer token
+  WLT_TUNNEL_PORT   local end of the control tunnel (default 18081)
+Rule store: $WLT_HOME/tunnels.json   (source of truth)
+SSH dir:    $WLT_SSH_DIR (default ~/.ssh)
 
 Python 3.8+. ASCII comments.
 """
@@ -41,8 +41,8 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-HOME = Path(os.environ.get("WLX_HOME", str(Path.home() / ".wlx")))
-SSH_DIR = Path(os.environ.get("WLX_SSH_DIR", str(Path.home() / ".ssh")))
+HOME = Path(os.environ.get("WLT_HOME", str(Path.home() / ".wlt")))
+SSH_DIR = Path(os.environ.get("WLT_SSH_DIR", str(Path.home() / ".ssh")))
 ENV_FILE = HOME / "bridge.env"
 RULES_FILE = HOME / "tunnels.json"
 AUDIT_FILE = HOME / "tunnels.audit.jsonl"
@@ -65,25 +65,25 @@ def load_env():
                 continue
             k, v = line.split("=", 1)
             conf[k.strip()] = v.strip()
-    for k in ("WLX_AGENT_TOKEN", "WLX_TUNNEL_PORT", "WLX_AGENT_PORT", "WLX_CONNECT_PORT"):
+    for k in ("WLT_AGENT_TOKEN", "WLT_TUNNEL_PORT", "WLT_AGENT_PORT", "WLT_CONNECT_PORT"):
         if os.environ.get(k):
             conf[k] = os.environ[k]
     return conf
 
 
 CONF = load_env()
-# Connection port: normally the Linux end of the control tunnel (WLX_TUNNEL_PORT).
-# WLX_CONNECT_PORT overrides it for direct local debugging (talk to the agent
-# port without a tunnel). The CONTROL port identity stays WLX_TUNNEL_PORT so
+# Connection port: normally the Linux end of the control tunnel (WLT_TUNNEL_PORT).
+# WLT_CONNECT_PORT overrides it for direct local debugging (talk to the agent
+# port without a tunnel). The CONTROL port identity stays WLT_TUNNEL_PORT so
 # reserved-port validation and permitlisten are correct regardless.
-PORT = CONF.get("WLX_CONNECT_PORT", CONF.get("WLX_TUNNEL_PORT", "18081"))
+PORT = CONF.get("WLT_CONNECT_PORT", CONF.get("WLT_TUNNEL_PORT", "18081"))
 BASE = f"http://127.0.0.1:{PORT}"
-TOKEN = CONF.get("WLX_AGENT_TOKEN", "")
-TIMEOUT = float(os.environ.get("WLX_TIMEOUT", "120"))
+TOKEN = CONF.get("WLT_AGENT_TOKEN", "")
+TIMEOUT = float(os.environ.get("WLT_TIMEOUT", "120"))
 
 
 def die(msg, code=1):
-    print(f"wlx: {msg}", file=sys.stderr)
+    print(f"wlt: {msg}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -107,7 +107,7 @@ def api(method, path, body=None):
             detail = {"error": raw}
         die(f"{path}: HTTP {exc.code}: {detail.get('error', '')} {detail.get('detail', '')}", 2)
     except urllib.error.URLError as exc:
-        die(f"cannot reach {BASE} ({exc.reason}) - is the Windows side running? try: wlx status", 125)
+        die(f"cannot reach {BASE} ({exc.reason}) - is the Windows side running? try: wlt status", 125)
     except socket.timeout:
         die(f"request to {BASE} timed out after {TIMEOUT}s", 124)
 
@@ -259,7 +259,7 @@ def rewrite_authorized_keys(rules, control_port):
     Atomic write, mode 0600."""
     keytype, blob = tunnel_pub_blob()
     opts = build_ak_options(rules, control_port)
-    new_line = f"{opts} {keytype} {blob} wlx-tunnel"
+    new_line = f"{opts} {keytype} {blob} wlt-tunnel"
     lines = []
     if AK_FILE.exists():
         lines = AK_FILE.read_text(encoding="utf-8").splitlines()
@@ -290,7 +290,7 @@ def apply_to_windows(rules):
 
 def commit_rules(rules, action, source="cli", push=True):
     """Validate -> persist -> rewrite authorized_keys -> audit -> push."""
-    control_port = CONF.get("WLX_TUNNEL_PORT", "18081")
+    control_port = CONF.get("WLT_TUNNEL_PORT", "18081")
     rules = validate_rules(rules, control_port)
     save_store(rules)
     opts = rewrite_authorized_keys(rules, control_port)
@@ -316,7 +316,7 @@ def print_rule_table(states):
 
 def show_apply_result(result):
     if not result.get("ok"):
-        print(f"wlx: apply reported a problem: {result.get('error') or result.get('note','')}",
+        print(f"wlt: apply reported a problem: {result.get('error') or result.get('note','')}",
               file=sys.stderr)
     print_rule_table(result.get("rules", []))
 
@@ -343,7 +343,7 @@ def cmd_status(_):
     local = load_store()
     lh = hashlib.sha256(json.dumps(local, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
     if lh != st.get("rules_hash"):
-        print(f"rules   : DRIFT (local {lh} != windows {st.get('rules_hash')}) - run: wlx tunnel sync")
+        print(f"rules   : DRIFT (local {lh} != windows {st.get('rules_hash')}) - run: wlt tunnel sync")
     else:
         print(f"rules   : in sync ({lh})")
     print_rule_table(st.get("rules", []))
@@ -598,7 +598,7 @@ def cmd_shot(args):
         print(f"{res.get('path')}  {res.get('width')}x{res.get('height')}  {res.get('size')} bytes")
         return
     import base64
-    out = args.out or f"wlx-shot-{time.strftime('%Y%m%d_%H%M%S')}.png"
+    out = args.out or f"wlt-shot-{time.strftime('%Y%m%d_%H%M%S')}.png"
     Path(out).write_bytes(base64.b64decode(res.get("b64", "")))
     print(f"saved {out}  ({res.get('width')}x{res.get('height')}, {res.get('size')} bytes)")
     if res.get("warning"):
@@ -742,8 +742,8 @@ def cmd_open(args):
 # --------------------------------------------------------------------------
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="wlx", description="wlx - Linux terminal -> Windows desktop + tunnels")
-    p.add_argument("--version", action="version", version=f"wlx {VERSION}")
+    p = argparse.ArgumentParser(prog="wlt", description="wlt - Linux terminal -> Windows desktop + tunnels")
+    p.add_argument("--version", action="version", version=f"wlt {VERSION}")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("ping", help="agent identity").set_defaults(fn=cmd_ping)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""wlx agent (Windows side) - single-process control agent + tunnel manager.
+"""wlt agent (Windows side) - single-process control agent + tunnel manager.
 
 Responsibilities:
-  * HTTP control API on 127.0.0.1:<WLX_AGENT_PORT> (Bearer token auth).
+  * HTTP control API on 127.0.0.1:<WLT_AGENT_PORT> (Bearer token auth).
   * Keep the CONTROL reverse SSH tunnel alive so Linux can reach this API.
   * Keep the USER tunnel alive: an arbitrary set of -L/-R forwards driven by
     a rule list mirrored from the Linux source of truth.
@@ -42,8 +42,8 @@ from pathlib import Path
 # both the bundled runtime and a normal interpreter.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import wlx_desktop as desktop
-from wlx_jobs import JobManager
+import wlt_desktop as desktop
+from wlt_jobs import JobManager
 
 VERSION = "0.1.0"
 
@@ -51,24 +51,24 @@ VERSION = "0.1.0"
 # Paths & configuration
 # --------------------------------------------------------------------------
 
-APP_DIR = Path(os.environ.get("WLX_APP_DIR", str(Path.home() / ".wlx")))
-CONF_PATH = APP_DIR / "wlx.conf"
+APP_DIR = Path(os.environ.get("WLT_APP_DIR", str(Path.home() / ".wlt")))
+CONF_PATH = APP_DIR / "wlt.conf"
 TOKEN_PATH = APP_DIR / "agent.token"
 RULES_PATH = APP_DIR / "tunnels.json"
 KEYS_DIR = APP_DIR / "keys"
 LOGS_DIR = APP_DIR / "logs"
 
 DEFAULTS = {
-    "WLX_LINUX_HOST": "",
-    "WLX_LINUX_USER": "",
-    "WLX_SSH_PORT": "22",
-    "WLX_REMOTE_ROOT": "",          # empty -> ~/wlx on Linux
-    "WLX_AGENT_PORT": "8788",
-    "WLX_TUNNEL_PORT": "18081",
-    "WLX_TICK_SECONDS": "10",
+    "WLT_LINUX_HOST": "",
+    "WLT_LINUX_USER": "",
+    "WLT_SSH_PORT": "22",
+    "WLT_REMOTE_ROOT": "",          # empty -> ~/wlt on Linux
+    "WLT_AGENT_PORT": "8788",
+    "WLT_TUNNEL_PORT": "18081",
+    "WLT_TICK_SECONDS": "10",
 }
 
-log = logging.getLogger("wlx.agent")
+log = logging.getLogger("wlt.agent")
 
 
 def load_conf():
@@ -89,7 +89,7 @@ def load_conf():
 
 def load_token():
     """Token from env (installer sets it) or the ACL-protected file."""
-    tok = os.environ.get("WLX_AGENT_TOKEN", "")
+    tok = os.environ.get("WLT_AGENT_TOKEN", "")
     if not tok and TOKEN_PATH.exists():
         tok = TOKEN_PATH.read_text(encoding="utf-8").strip()
     return tok
@@ -188,15 +188,15 @@ class TunnelSlot:
     # -- process lifecycle -------------------------------------------------
 
     def _ssh_exe(self):
-        return self.conf.get("WLX_SSH_EXE") or "ssh"
+        return self.conf.get("WLT_SSH_EXE") or "ssh"
 
     def _key(self):
         return str(KEYS_DIR / "tunnel_ed25519")
 
     def _target(self):
-        host = self.conf["WLX_LINUX_HOST"]
-        user = self.conf["WLX_LINUX_USER"]
-        port = self.conf["WLX_SSH_PORT"]
+        host = self.conf["WLT_LINUX_HOST"]
+        user = self.conf["WLT_LINUX_USER"]
+        port = self.conf["WLT_SSH_PORT"]
         return f"{user}@{host}" if user else host, port
 
     def alive(self):
@@ -213,8 +213,8 @@ class TunnelSlot:
             self.last_error = f"tunnel key missing: {key} - run install-win.ps1"
             log.warning("%s: %s", self.name, self.last_error)
             return False
-        if not self.conf["WLX_LINUX_HOST"]:
-            self.last_error = "WLX_LINUX_HOST not configured"
+        if not self.conf["WLT_LINUX_HOST"]:
+            self.last_error = "WLT_LINUX_HOST not configured"
             return False
         target, port = self._target()
         known_hosts = str(Path.home() / ".ssh" / "known_hosts")
@@ -278,7 +278,7 @@ class TunnelSlot:
         if re.search(r"Permission denied|publickey|Too many authentication", raw):
             return "authentication refused - tunnel key not authorised; re-run install-win.ps1"
         if re.search(r"Could not resolve hostname|No route to host|Connection timed out|Connection refused", raw):
-            return (f"cannot reach {self.conf['WLX_LINUX_HOST']}:{self.conf['WLX_SSH_PORT']} "
+            return (f"cannot reach {self.conf['WLT_LINUX_HOST']}:{self.conf['WLT_SSH_PORT']} "
                     f"- check host is up and port is correct")
         if "Host key verification failed" in raw:
             return "host key mismatch - remove the stale entry from ~/.ssh/known_hosts and retry"
@@ -320,7 +320,7 @@ class TunnelManager(threading.Thread):
     """Watchdog thread: keeps both tunnels alive, applies rule changes."""
 
     def __init__(self, conf):
-        super().__init__(daemon=True, name="wlx-tunnels")
+        super().__init__(daemon=True, name="wlt-tunnels")
         self.conf = conf
         self.control = TunnelSlot("control", conf)
         self.user = TunnelSlot("user", conf)
@@ -347,8 +347,8 @@ class TunnelManager(threading.Thread):
     # -- control plane -----------------------------------------------------
 
     def control_forwards(self):
-        tp = self.conf["WLX_TUNNEL_PORT"]
-        ap = self.conf["WLX_AGENT_PORT"]
+        tp = self.conf["WLT_TUNNEL_PORT"]
+        ap = self.conf["WLT_AGENT_PORT"]
         return ["-R", f"127.0.0.1:{tp}:127.0.0.1:{ap}"]
 
     def apply_rules(self, rules):
@@ -416,7 +416,7 @@ class TunnelManager(threading.Thread):
 
     def run(self):
         tick = 0
-        tick_s = max(int(self.conf.get("WLX_TICK_SECONDS", "10")), 1)
+        tick_s = max(int(self.conf.get("WLT_TICK_SECONDS", "10")), 1)
         # Start both immediately on boot.
         if self.control.start(self.control_forwards()):
             self.control.note_success()
@@ -540,7 +540,7 @@ def run_command(payload):
 def push_rules_to_linux(conf, rules):
     """Push a rule set to the Linux source of truth over the management key.
 
-    The Linux CLI (`wlx tunnel import`) is the single authoritative validator
+    The Linux CLI (`wlt tunnel import`) is the single authoritative validator
     and the only writer of authorized_keys. GUI-originated changes MUST go
     through it, otherwise sshd would refuse the new forwards (permitopen /
     permitlisten not updated). CLI-originated changes already did this locally
@@ -549,17 +549,17 @@ def push_rules_to_linux(conf, rules):
     key = str(KEYS_DIR / "mgmt_ed25519")
     if not Path(key).exists():
         return False, "management key missing; cannot sync rules to Linux"
-    host = conf["WLX_LINUX_HOST"]
-    user = conf["WLX_LINUX_USER"]
-    port = conf["WLX_SSH_PORT"]
+    host = conf["WLT_LINUX_HOST"]
+    user = conf["WLT_LINUX_USER"]
+    port = conf["WLT_SSH_PORT"]
     if not host:
-        return False, "WLX_LINUX_HOST not configured"
-    remote_root = conf.get("WLX_REMOTE_ROOT") or "~/wlx"
+        return False, "WLT_LINUX_HOST not configured"
+    remote_root = conf.get("WLT_REMOTE_ROOT") or "~/wlt"
     target = f"{user}@{host}" if user else host
     args = ["ssh", "-i", key, "-p", str(port),
             "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
             "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=10",
-            target, f"{remote_root}/linux/wlx tunnel import"]
+            target, f"{remote_root}/linux/wlt tunnel import"]
     payload = json.dumps({"rules": rules}, ensure_ascii=False).encode("utf-8")
     try:
         r = subprocess.run(args, input=payload, capture_output=True, timeout=30,
@@ -578,7 +578,7 @@ def push_rules_to_linux(conf, rules):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "wlx/" + VERSION
+    server_version = "wlt/" + VERSION
 
     # injected by main()
     conf = None
@@ -616,7 +616,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if not self._authorized():
             self._json(401, {"error": "unauthorized",
-                             "hint": "Authorization: Bearer <WLX_AGENT_TOKEN>"})
+                             "hint": "Authorization: Bearer <WLT_AGENT_TOKEN>"})
             return
         routes = {
             "/ping": self._ping,
@@ -696,10 +696,10 @@ class Handler(BaseHTTPRequestHandler):
             ssh_ver = "ssh.exe not found"
         return {
             "version": VERSION,
-            "agent_port": self.conf["WLX_AGENT_PORT"],
-            "tunnel_port": self.conf["WLX_TUNNEL_PORT"],
-            "linux_host": self.conf["WLX_LINUX_HOST"],
-            "ssh_port": self.conf["WLX_SSH_PORT"],
+            "agent_port": self.conf["WLT_AGENT_PORT"],
+            "tunnel_port": self.conf["WLT_TUNNEL_PORT"],
+            "linux_host": self.conf["WLT_LINUX_HOST"],
+            "ssh_port": self.conf["WLT_SSH_PORT"],
             "ssh_version": ssh_ver,
             "python": sys.version.split()[0],
             "app_dir": str(APP_DIR),
@@ -750,7 +750,7 @@ def main():
     setup_logging()
     lock = acquire_lock()
     if lock is None:
-        log.info("another wlx agent is already running; exiting")
+        log.info("another wlt agent is already running; exiting")
         return
     conf = load_conf()
     token = load_token()
@@ -767,16 +767,16 @@ def main():
     lost = jobs.recover()
     if lost:
         log.info("jobs: marked %d orphaned job(s) LOST on startup", lost)
-    jobs.prune(int(os.environ.get("WLX_JOB_KEEP_DAYS", "7")))
+    jobs.prune(int(os.environ.get("WLT_JOB_KEEP_DAYS", "7")))
     Handler.conf = conf
     Handler.token = token
     Handler.manager = manager
     Handler.jobs = jobs
 
-    port = int(conf["WLX_AGENT_PORT"])
+    port = int(conf["WLT_AGENT_PORT"])
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     manager.start()
-    log.info("wlx agent %s listening on 127.0.0.1:%d (app_dir=%s)", VERSION, port, APP_DIR)
+    log.info("wlt agent %s listening on 127.0.0.1:%d (app_dir=%s)", VERSION, port, APP_DIR)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -784,7 +784,7 @@ def main():
     finally:
         manager.shutdown()
         httpd.server_close()
-        log.info("wlx agent exit")
+        log.info("wlt agent exit")
 
 
 if __name__ == "__main__":

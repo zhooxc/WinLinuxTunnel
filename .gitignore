@@ -5,7 +5,7 @@ dist/
 *.zip
 
 # Local config & secrets - NEVER commit these
-wlx.conf
+wlt.conf
 agent.token
 bridge.env
 keys/

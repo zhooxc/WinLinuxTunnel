@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the wlx release zip.
+"""Package the wlt release zip.
 
 Zero-dependency when win/runtime/python.exe is present (built by
 tools/build-runtime.ps1). Without it, produces a source-only zip and warns
@@ -20,8 +20,8 @@ DIST = ROOT / "dist"
 INCLUDE_DIRS = ["win", "linux", "tools", "docs"]
 INCLUDE_FILES = ["README.md", "VERSION", "LICENSE", "NOTICE", "CHANGELOG.md", "DESIGN.md"]
 
-EXCLUDE_PARTS = {".git", "__pycache__", "jobs", "logs", "keys", ".wlx", "dist", "refs", ".pytest_cache"}
-EXCLUDE_NAMES = {"wlx.conf", "agent.token", "bridge.env", "tunnels.json",
+EXCLUDE_PARTS = {".git", "__pycache__", "jobs", "logs", "keys", ".wlt", "dist", "refs", ".pytest_cache"}
+EXCLUDE_NAMES = {"wlt.conf", "agent.token", "bridge.env", "tunnels.json",
                  "tunnels.audit.jsonl", "agent.lock"}
 EXCLUDE_SUFFIX = {".pyc", ".lock", ".tmp"}
 
@@ -44,7 +44,7 @@ def main():
               "(target machine will need Python). Run tools/build-runtime.ps1 first "
               "for a zero-dependency package.", file=sys.stderr)
     DIST.mkdir(exist_ok=True)
-    out = DIST / f"wlx-{VERSION}.zip"
+    out = DIST / f"WinLinuxTunnel-{VERSION}.zip"
     count = 0
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         for d in INCLUDE_DIRS:

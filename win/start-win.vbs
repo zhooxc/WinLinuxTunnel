@@ -1,4 +1,4 @@
-' wlx agent - hidden launch of the crash-restart loop.
+' wlt agent - hidden launch of the crash-restart loop.
 Set fso = CreateObject("Scripting.FileSystemObject")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
 Set sh = CreateObject("WScript.Shell")

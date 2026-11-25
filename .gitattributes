@@ -1,7 +1,7 @@
 # Line-ending policy: Linux-executed scripts MUST be LF (a CRLF shebang
 # breaks with "bad interpreter" on Linux). Windows scripts stay CRLF.
 * text=auto
-linux/wlx   text eol=lf
+linux/wlt   text eol=lf
 *.sh        text eol=lf
 *.py        text eol=lf
 *.pyw       text eol=lf

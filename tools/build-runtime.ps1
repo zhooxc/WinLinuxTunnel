@@ -1,4 +1,4 @@
-# wlx - build the self-contained Python runtime shipped in win\runtime.
+# wlt - build the self-contained Python runtime shipped in win\runtime.
 #
 # The end user needs no Python, pip or PuTTY. This produces a portable
 # interpreter with working tkinter from two public sources:
@@ -24,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $OutDir) { $OutDir = Join-Path $root 'win\runtime' }
-$cache = Join-Path $env:USERPROFILE '.wlx\cache'
+$cache = Join-Path $env:USERPROFILE '.wlt\cache'
 New-Item -ItemType Directory -Path $cache -Force | Out-Null
 
 function Say { param($T) Write-Host "[build] $T" }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wlx persistent job engine (Windows side).
+"""wlt persistent job engine (Windows side).
 
 Semantics inherited from WinLinuxBridge (MIT, see NOTICE):
   * Every command becomes a job persisted on disk: job.json + stdout.log +
@@ -34,7 +34,7 @@ from pathlib import Path
 MAX_CAPTURE_BYTES = 32 * 1024 * 1024   # 32 MB per stream, enforced live
 SUMMARY_HEAD = 4 * 1024
 SUMMARY_TAIL = 4 * 1024
-RESOURCE_WAIT_TIMEOUT = float(os.environ.get("WLX_RESOURCE_WAIT_TIMEOUT", "600"))
+RESOURCE_WAIT_TIMEOUT = float(os.environ.get("WLT_RESOURCE_WAIT_TIMEOUT", "600"))
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 TERMINAL = {"SUCCEEDED", "FAILED", "TIMEOUT", "CANCELLED", "LOST", "SPAWN_ERROR"}
@@ -269,7 +269,7 @@ class JobManager:
             if res:
                 self._resources[res] = job_id
             t = threading.Thread(target=self._run_job, args=(job_id,), daemon=True,
-                                 name=f"wlx-job-{job_id}")
+                                 name=f"wlt-job-{job_id}")
             t.start()
         self._queue = still
 

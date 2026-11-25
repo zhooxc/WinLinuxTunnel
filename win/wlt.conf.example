@@ -1,0 +1,12 @@
+# wlt settings example - NOT used at runtime.
+# Real settings: %USERPROFILE%\.wlt\wlt.conf (written by install-win.ps1 / GUI).
+# No secrets here. The token lives in %USERPROFILE%\.wlt\agent.token (ACL) and
+# the WLT_AGENT_TOKEN user environment variable.
+
+WLT_LINUX_HOST=          # Linux server address (Windows dials out to it)
+WLT_LINUX_USER=          # Linux account (only ~ needed, no sudo)
+WLT_SSH_PORT=22
+WLT_REMOTE_ROOT=         # empty -> ~/wlt on Linux
+WLT_AGENT_PORT=8788      # control agent on 127.0.0.1 (Windows)
+WLT_TUNNEL_PORT=18081    # control tunnel listen port on 127.0.0.1 (Linux)
+WLT_TICK_SECONDS=10      # tunnel watchdog interval

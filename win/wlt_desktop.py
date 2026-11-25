@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wlx desktop operations (Windows side) - ctypes only, no third-party deps.
+"""wlt desktop operations (Windows side) - ctypes only, no third-party deps.
 
 Faithful reimplementation of the WinLinuxBridge desktop layer (MIT, see NOTICE)
 plus additions:
@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Module config, set by init().
-SHOT_DIR = Path.home() / ".wlx" / "shots"
+SHOT_DIR = Path.home() / ".wlt" / "shots"
 ALLOWED_ROOTS = []          # whitelist for file ops
 MAX_FILE = 16 * 1024 * 1024  # 16 MB cap for file read/write and http bodies
 

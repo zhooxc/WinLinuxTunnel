@@ -1,4 +1,4 @@
-# wlx 使用手册
+# wlt 使用手册
 
 部署、配置、命令与排障。设计背景见 [DESIGN.md](../DESIGN.md)。
 
@@ -25,55 +25,55 @@ Linux 的 sshd 需允许 TCP 转发（`AllowTcpForwarding yes`，绝大多数发
   ```
 
 按提示填 Linux 地址、账号，**输入一次 Linux 密码**（仅用于装公钥，不落盘、不进日志）。
-安装器自动完成：生成两把专用密钥 → 装公钥 → 上传 `linux/tools/docs` 到 `~/wlx` →
+安装器自动完成：生成两把专用密钥 → 装公钥 → 上传 `linux/tools/docs` 到 `~/wlt` →
 写本地配置与令牌 → 注册当前用户自启 → 启动代理。
 
 > 首次连接会显示服务器主机指纹让你确认（`StrictHostKeyChecking=accept-new`）。
 
 ### Linux
 
-无需手动安装。安装器已把 CLI 放到 `~/wlx/linux/wlx`。建议加别名：
+无需手动安装。安装器已把 CLI 放到 `~/wlt/linux/wlt`。建议加别名：
 
 ```bash
-echo 'alias wlx=~/wlx/linux/wlx' >> ~/.bashrc && source ~/.bashrc
-wlx status
+echo 'alias wlt=~/wlt/linux/wlt' >> ~/.bashrc && source ~/.bashrc
+wlt status
 ```
 
 ## 配置
 
-- Windows：`%USERPROFILE%\.wlx\wlx.conf`（键值对），令牌在 `agent.token`（ACL 保护）
-  与用户环境变量 `WLX_AGENT_TOKEN`。
-- Linux：`~/.wlx/bridge.env`（0600，含令牌与端口），规则真相源 `~/.wlx/tunnels.json`。
+- Windows：`%USERPROFILE%\.wlt\wlt.conf`（键值对），令牌在 `agent.token`（ACL 保护）
+  与用户环境变量 `WLT_AGENT_TOKEN`。
+- Linux：`~/.wlt/bridge.env`（0600，含令牌与端口），规则真相源 `~/.wlt/tunnels.json`。
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `WLX_LINUX_HOST` / `WLX_LINUX_USER` | — | Windows 外连的目标 |
-| `WLX_SSH_PORT` | 22 | SSH 端口 |
-| `WLX_AGENT_PORT` | 8788 | Windows 控制代理（回环） |
-| `WLX_TUNNEL_PORT` | 18081 | 控制隧道在 Linux 的监听口（回环） |
+| `WLT_LINUX_HOST` / `WLT_LINUX_USER` | — | Windows 外连的目标 |
+| `WLT_SSH_PORT` | 22 | SSH 端口 |
+| `WLT_AGENT_PORT` | 8788 | Windows 控制代理（回环） |
+| `WLT_TUNNEL_PORT` | 18081 | 控制隧道在 Linux 的监听口（回环） |
 
 默认端口刻意与原 WinLinuxBridge（8787/18080）错开，**两者可共存**。
 
 ## 命令一览
 
 ```
-wlx status | ping | doctor          健康检查 / 代理身份 / 环境报告
-wlx run [--shell cmd|powershell] [--timeout N] -- <命令>   同步执行
-wlx job start|status|logs|result|cancel|list|stats         持久化任务
-wlx batch --file plan.json          多步顺序执行（资源键互斥）
-wlx shot [--monitor N|--region x,y,w,h|--window HWND] [--out FILE]   截图
-wlx monitors | windows [--json]     显示器 / 窗口列举
-wlx click X Y [--double|--right|--middle]   点击
-wlx move X Y | drag X1 Y1 X2 Y2 | scroll DELTA   鼠标
-wlx type TEXT | key COMBO [--repeat N]   键盘
-wlx focus --title T | --hwnd H      置前窗口
-wlx wait-window TITLE [--timeout N] 等待窗口出现
-wlx copy | paste TEXT               剪贴板读 / 写
-wlx http URL [--method --body --header K:V]   访问 Windows 本机 HTTP
-wlx ls [PATH] | get REMOTE [LOCAL] | put LOCAL [REMOTE] | rm PATH [--recursive]
-wlx open PATH|URL                   在 Windows 打开
-wlx tunnel add L|R <监听> <目标> [--note --id --lan]
-wlx tunnel list | on|off|rm|probe <id> | sync | import
+wlt status | ping | doctor          健康检查 / 代理身份 / 环境报告
+wlt run [--shell cmd|powershell] [--timeout N] -- <命令>   同步执行
+wlt job start|status|logs|result|cancel|list|stats         持久化任务
+wlt batch --file plan.json          多步顺序执行（资源键互斥）
+wlt shot [--monitor N|--region x,y,w,h|--window HWND] [--out FILE]   截图
+wlt monitors | windows [--json]     显示器 / 窗口列举
+wlt click X Y [--double|--right|--middle]   点击
+wlt move X Y | drag X1 Y1 X2 Y2 | scroll DELTA   鼠标
+wlt type TEXT | key COMBO [--repeat N]   键盘
+wlt focus --title T | --hwnd H      置前窗口
+wlt wait-window TITLE [--timeout N] 等待窗口出现
+wlt copy | paste TEXT               剪贴板读 / 写
+wlt http URL [--method --body --header K:V]   访问 Windows 本机 HTTP
+wlt ls [PATH] | get REMOTE [LOCAL] | put LOCAL [REMOTE] | rm PATH [--recursive]
+wlt open PATH|URL                   在 Windows 打开
+wlt tunnel add L|R <监听> <目标> [--note --id --lan]
+wlt tunnel list | on|off|rm|probe <id> | sync | import
 ```
 
 ## 隧道规则（核心新功能）
@@ -88,17 +88,17 @@ wlx tunnel list | on|off|rm|probe <id> | sync | import
 例：让 Windows 访问 Linux 上的 3080 web 服务（对应参考截图）：
 
 ```bash
-wlx tunnel add L 3080 127.0.0.1:3080 --note "linux web"
+wlt tunnel add L 3080 127.0.0.1:3080 --note "linux web"
 # Windows 上即可：curl http://127.0.0.1:3080
-wlx tunnel list        # 看每条规则实时状态
-wlx tunnel probe l3080 # 端到端探测
+wlt tunnel list        # 看每条规则实时状态
+wlt tunnel probe l3080 # 端到端探测
 ```
 
 - 规则增删改**即时生效**（重启用户隧道进程，1–2 秒闪断，不丢任务）。
 - 断线**自动重连**，指数退避 10s→120s。
 - 默认只绑回环；`--lan` 显式允许非回环监听。
 - 控制端口 18081 保留；同方向监听端口冲突会被拒绝。
-- `wlx tunnel sync` 强制把 Linux 真相源推给 Windows 并核对 authorized_keys。
+- `wlt tunnel sync` 强制把 Linux 真相源推给 Windows 并核对 authorized_keys。
 
 GUI「隧道」页提供同样的增删改查（勾选启用、双击编辑、探测按钮）。
 
@@ -106,13 +106,13 @@ GUI「隧道」页提供同样的增删改查（勾选启用、双击编辑、�
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| `wlx status` 控制隧道 DOWN | Windows 代理没起：双击 `win\start-win.vbs`；看 `%USERPROFILE%\.wlx\logs\` |
+| `wlt status` 控制隧道 DOWN | Windows 代理没起：双击 `win\start-win.vbs`；看 `%USERPROFILE%\.wlt\logs\` |
 | 隧道 `remote port forwarding failed for listen port N` | Linux 侧旧 sshd 会话占着端口：`ss -tlnp \| grep :N`，等回收或杀掉 |
 | `authentication refused` | 隧道钥未授权：重跑 `install-win.ps1` |
 | `host key mismatch` | 删 `~/.ssh/known_hosts` 里过期条目再试 |
 | 截图很小/全黑 | Windows 锁屏了；需解锁会话 |
 | 重启后桥没恢复 | 自启在登录时触发，需有人登录 |
-| 规则状态 DRIFT | `wlx tunnel sync` 重新对齐 |
+| 规则状态 DRIFT | `wlt tunnel sync` 重新对齐 |
 
 ## 安全模型
 

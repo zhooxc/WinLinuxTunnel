@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-11-25
+
+### 变更
+- **项目更名**：仓库 `wlx` → `WinLinuxTunnel`，命令行 `wlx` → `wlt`；
+  全量重构所有标识符（`WLT_` 环境变量、`.wlt` 目录、`~/wlt`、模块文件名）。
+  旧 GitHub 地址自动重定向。
+- **GUI 重做为正规 Windows 桌面软件**：
+  - 系统托盘（纯 ctypes Shell_NotifyIcon，零依赖）：关闭默认最小化到通知区域，
+    双击恢复，右键菜单（显示/退出）；正常最小化到任务栏。
+  - 应用图标（蓝底双向箭头）；仪表盘式布局：左侧导航（概览/隧道/桌面/日志/设置）
+    + 状态卡片 + 连接状态指示。
+  - 新增「桌面」页：截图预览/保存、窗口列表、剪贴板读取。
+  - 隧道页状态着色（up 绿/down 红/off 灰），更友好的规则编辑对话框。
+
+### 新增
+- `win/wlt_tray.py`：零依赖系统托盘模块。
+- `tools/make_icon.py`：纯标准库渲染应用图标（PNG-in-ICO）。
+
 ## [0.1.0] - 2026-11-25
 
 首个版本。仿照 [WinLinuxBridge](https://github.com/Fatmear/WinLinuxBridge)（MIT）
@@ -46,4 +64,4 @@
   GUI 构造、零依赖运行时全栈（代理+CLI+GUI 仅用随包运行时）。
 - 待办：真实 Linux 主机的 SSH 隧道端到端验证（需测试机）。
 
-[0.1.0]: https://github.com/zhooxc/wlx/releases/tag/v0.1.0
+[0.1.0]: https://github.com/zhooxc/WinLinuxTunnel/releases/tag/v0.1.0
