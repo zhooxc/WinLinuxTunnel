@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wlt_desktop as desktop
 from wlt_jobs import JobManager
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 # --------------------------------------------------------------------------
 # Paths & configuration
