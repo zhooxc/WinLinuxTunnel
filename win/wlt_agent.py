@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wlt_desktop as desktop
 from wlt_jobs import JobManager
 
-VERSION = "0.1.0"
+VERSION = "0.2.1"
 
 # --------------------------------------------------------------------------
 # Paths & configuration
@@ -450,7 +450,10 @@ class TunnelManager(threading.Thread):
             except Exception as exc:  # never let the watchdog die
                 log.error("tunnel loop error: %s", exc)
             tick += 1
-            self._stop.wait(tick_s)
+            # Wake IMMEDIATELY when a rule apply is pending (event-driven),
+            # otherwise after one tick. Waiting only on the tick made every
+            # /tunnels/apply block up to tick_s (10s) -> the GUI felt frozen.
+            self._apply_event.wait(tick_s)
 
     def shutdown(self):
         self._stop.set()

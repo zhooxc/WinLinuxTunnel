@@ -19,6 +19,7 @@ import queue
 import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -88,6 +89,7 @@ class App:
         self.connected = False
         self._refreshing = False
         self._tray_events = queue.Queue()
+        self._results = queue.Queue()
         self._tray = None
         self.close_to_tray = tk.BooleanVar(value=True)
         self._shot_img = None
@@ -131,6 +133,7 @@ class App:
         self.refresh()
         self._auto()
         self._poll_tray()
+        self._poll_results()
 
     # -- 框架 ------------------------------------------------------------
     def _build_header(self):
@@ -237,14 +240,20 @@ class App:
         return next((r for r in self.rules if r.get("id") == sel[0]), None)
 
     def _apply(self, rules):
-        try:
-            res = api("POST", "/tunnels/apply", {"rules": rules, "sync_linux": True}, timeout=40)
-        except (urllib.error.URLError, OSError) as exc:
-            messagebox.showerror("代理不可达", f"无法连接代理：{exc}\n请确认 WinLinuxTunnel 代理已启动。")
-            return False
-        if not res.get("ok"):
-            messagebox.showwarning("应用未完全成功", res.get("error") or res.get("note", ""))
-        self.refresh()
+        self.statusbar.config(text="正在应用规则（同步到 Linux）…")
+
+        def work():
+            return api("POST", "/tunnels/apply", {"rules": rules, "sync_linux": True}, timeout=40)
+
+        def done(res, err):
+            if err is not None:
+                messagebox.showerror("代理不可达", f"无法连接代理：{err}\n请确认 WinLinuxTunnel 代理已启动。")
+                self.statusbar.config(text="应用失败")
+                return
+            if not res.get("ok"):
+                messagebox.showwarning("应用未完全成功", res.get("error") or res.get("note", ""))
+            self.refresh()
+        self._run_async(work, done)
         return True
 
     def add_rule(self):
@@ -330,11 +339,17 @@ class App:
         hp, label = ((r["listen"], "端到端（Windows 监听口 → Linux 目标）") if r["dir"] == "L"
                      else (r["target"], "目标侧检查（Windows 本地目标）"))
         host, port = hp.rsplit(":", 1)
-        try:
+
+        def work():
             with socket.create_connection((host, int(port)), timeout=5):
+                return True
+
+        def done(res, err):
+            if err is not None:
+                messagebox.showwarning("探测失败", f"{r['id']}：FAIL\n{label}\n{err}")
+            else:
                 messagebox.showinfo("探测成功", f"{r['id']}：OK\n{label}")
-        except OSError as exc:
-            messagebox.showwarning("探测失败", f"{r['id']}：FAIL\n{label}\n{exc}")
+        self._run_async(work, done)
 
     def sync_rules(self):
         self._apply(self.rules)
@@ -367,18 +382,28 @@ class App:
         paned.add(right, weight=2)
 
     def do_shot(self):
-        try:
-            res = api("POST", "/screenshot", {"mode": "b64"}, timeout=30)
-            raw = base64.b64decode(res.get("b64", ""))
-            img = tk.PhotoImage(data=base64.b64encode(raw).decode("ascii"))
-            factor = max(1, img.width() // 460)
-            if factor > 1:
-                img = img.subsample(factor, factor)
-            self._shot_img = img
-            self.shot_label.configure(image=img, text="")
-            self.statusbar.config(text=f"截图 {res.get('width')}x{res.get('height')}，{res.get('size')} 字节")
-        except (urllib.error.URLError, OSError, tk.TclError) as exc:
-            messagebox.showerror("截图失败", str(exc))
+        self.statusbar.config(text="截图中…")
+
+        def work():
+            return api("POST", "/screenshot", {"mode": "b64"}, timeout=30)
+
+        def done(res, err):
+            if err is not None:
+                messagebox.showerror("截图失败", str(err))
+                self.statusbar.config(text="截图失败")
+                return
+            try:
+                raw = base64.b64decode(res.get("b64", ""))
+                img = tk.PhotoImage(data=base64.b64encode(raw).decode("ascii"))
+                factor = max(1, img.width() // 460)
+                if factor > 1:
+                    img = img.subsample(factor, factor)
+                self._shot_img = img
+                self.shot_label.configure(image=img, text="")
+                self.statusbar.config(text=f"截图 {res.get('width')}x{res.get('height')}，{res.get('size')} 字节")
+            except tk.TclError as exc:
+                messagebox.showerror("截图失败", str(exc))
+        self._run_async(work, done)
 
     def do_shot_save(self):
         from tkinter import filedialog
@@ -386,32 +411,48 @@ class App:
                                             filetypes=[("PNG 图片", "*.png")])
         if not path:
             return
-        try:
+        self.statusbar.config(text="截图保存中…")
+
+        def work():
             res = api("POST", "/screenshot", {"mode": "b64"}, timeout=30)
             Path(path).write_bytes(base64.b64decode(res.get("b64", "")))
-            self.statusbar.config(text=f"截图已保存：{path}")
-        except (urllib.error.URLError, OSError) as exc:
-            messagebox.showerror("截图失败", str(exc))
+            return res
+
+        def done(res, err):
+            if err is not None:
+                messagebox.showerror("截图失败", str(err))
+                self.statusbar.config(text="截图失败")
+            else:
+                self.statusbar.config(text=f"截图已保存：{path}")
+        self._run_async(work, done)
 
     def do_clipboard(self):
-        try:
-            res = api("POST", "/clipboard", {"op": "get"})
+        def work():
+            return api("POST", "/clipboard", {"op": "get"})
+
+        def done(res, err):
+            if err is not None:
+                messagebox.showerror("读取失败", str(err))
+                return
             text = res.get("text", "")
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             messagebox.showinfo("剪贴板", f"已读取 {len(text)} 字符并复制到本机剪贴板：\n\n{text[:300]}")
-        except (urllib.error.URLError, OSError) as exc:
-            messagebox.showerror("读取失败", str(exc))
+        self._run_async(work, done)
 
     def do_windows(self):
-        try:
-            res = api("GET", "/windows")
+        def work():
+            return api("GET", "/windows")
+
+        def done(res, err):
+            if err is not None:
+                messagebox.showerror("获取窗口失败", str(err))
+                return
             self.win_tree.delete(*self.win_tree.get_children())
             for w in res.get("windows", []):
                 self.win_tree.insert("", "end", values=(
                     w.get("hwnd"), w.get("pid"), w.get("process", ""), w.get("title", "")))
-        except (urllib.error.URLError, OSError) as exc:
-            messagebox.showerror("获取窗口失败", str(exc))
+        self._run_async(work, done)
 
     # -- 日志 ------------------------------------------------------------
     def _build_log(self):
@@ -526,54 +567,89 @@ class App:
             self._tray.stop()
         self.root.destroy()
 
+    # -- 后台 I/O --------------------------------------------------------
+    # 所有网络/阻塞操作都在工作线程里跑，结果经 root.after 回主线程更新 UI，
+    # 界面永不因 SSH 往返 / 代理等待而冻结。
+    def _run_async(self, work, done):
+        def runner():
+            try:
+                res, err = work(), None
+            except Exception as exc:
+                res, err = None, exc
+            # Hand back via a thread-safe queue drained on the MAIN thread.
+            # Calling root.after from a worker thread is unreliable in Tk;
+            # the queue + main-thread poller is the robust pattern.
+            self._results.put((done, res, err))
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _poll_results(self):
+        try:
+            while True:
+                done, res, err = self._results.get_nowait()
+                try:
+                    done(res, err)
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(30, self._poll_results)
+        except (RuntimeError, tk.TclError):
+            pass
+
     # -- 刷新 ------------------------------------------------------------
     def refresh(self):
         if self._refreshing:
             return
         self._refreshing = True
-        try:
-            ping = api("GET", "/ping", timeout=5)
-            st = api("GET", "/tunnels/status", timeout=5)
-            self.connected = True
-            self.conn_pill.config(text="● 已连接", fg=OK)
-            c, u = st.get("control", {}), st.get("user", {})
-            self._set_card(self.card_agent, "运行中", OK,
-                           f"v{ping.get('version')}  {ping.get('host')}\n用户 {ping.get('user')}")
-            self._set_card(self.card_control, "UP" if c.get("alive") else "DOWN",
-                           OK if c.get("alive") else BAD,
-                           ",".join(c.get("forwards", [])) or (c.get("last_error", "")[:60]))
-            self._set_card(self.card_user, "UP" if u.get("alive") else "DOWN",
-                           OK if u.get("alive") else BAD,
-                           u.get("last_error", "")[:60] or f"{len(self.rules)} 条规则")
-            self.rules = st.get("rules", [])
-            up_n = sum(1 for r in self.rules if r.get("state") == "up")
-            self._set_card(self.card_rules, str(len(self.rules)), ACCENT, f"{up_n} 条 up")
-            self.dash_summary.config(
-                text=f"代理版本 {ping.get('version')}（Python {ping.get('python')}）。"
-                     f"控制隧道把 Linux 的 127.0.0.1:{CONF.get('WLT_TUNNEL_PORT')} 接到 Windows 代理；"
-                     f"用户隧道按规则双向转发。规则增删即时生效，断线自动重连。")
-            self.tree.delete(*self.tree.get_children())
-            for r in self.rules:
-                state = r.get("state", "?")
-                tag = "up" if state == "up" else "off" if not r.get("enabled", True) else "down"
-                self.tree.insert("", "end", iid=r.get("id"), tags=(tag,), values=(
-                    "✓" if r.get("enabled", True) else "—", r.get("dir"),
-                    r.get("listen"), r.get("target"), state, r.get("note", "")))
-            self.statusbar.config(text=f"已连接 · 规则 {len(self.rules)} 条 · 端口 {CONF.get('WLT_AGENT_PORT')}")
-            if self._tray:
-                self._tray.set_tooltip(f"WinLinuxTunnel — 已连接，{len(self.rules)} 条规则")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+
+        def work():
+            return api("GET", "/ping", timeout=5), api("GET", "/tunnels/status", timeout=5)
+
+        self._run_async(work, self._on_refresh)
+
+    def _on_refresh(self, result, error):
+        self._refreshing = False
+        if error is not None:
             self.connected = False
             self.conn_pill.config(text="● 未连接", fg=BAD)
             for card in (self.card_agent, self.card_control, self.card_user, self.card_rules):
                 self._set_card(card, "—", MUTE, "")
-            self.dash_summary.config(text=f"无法连接代理（{exc}）。请确认 WinLinuxTunnel 代理已启动"
+            self.dash_summary.config(text=f"无法连接代理（{error}）。请确认 WinLinuxTunnel 代理已启动"
                                           f"（双击 win\\start-win.vbs），或先在「设置」页运行安装向导。")
             self.statusbar.config(text="未连接代理")
             if self._tray:
                 self._tray.set_tooltip("WinLinuxTunnel — 未连接")
-        finally:
-            self._refreshing = False
+            return
+        ping, st = result
+        self.connected = True
+        self.conn_pill.config(text="● 已连接", fg=OK)
+        c, u = st.get("control", {}), st.get("user", {})
+        self._set_card(self.card_agent, "运行中", OK,
+                       f"v{ping.get('version')}  {ping.get('host')}\n用户 {ping.get('user')}")
+        self._set_card(self.card_control, "UP" if c.get("alive") else "DOWN",
+                       OK if c.get("alive") else BAD,
+                       ",".join(c.get("forwards", [])) or (c.get("last_error", "")[:60]))
+        self._set_card(self.card_user, "UP" if u.get("alive") else "DOWN",
+                       OK if u.get("alive") else BAD,
+                       u.get("last_error", "")[:60] or f"{len(self.rules)} 条规则")
+        self.rules = st.get("rules", [])
+        up_n = sum(1 for r in self.rules if r.get("state") == "up")
+        self._set_card(self.card_rules, str(len(self.rules)), ACCENT, f"{up_n} 条 up")
+        self.dash_summary.config(
+            text=f"代理版本 {ping.get('version')}（Python {ping.get('python')}）。"
+                 f"控制隧道把 Linux 的 127.0.0.1:{CONF.get('WLT_TUNNEL_PORT')} 接到 Windows 代理；"
+                 f"用户隧道按规则双向转发。规则增删即时生效，断线自动重连。")
+        self.tree.delete(*self.tree.get_children())
+        for r in self.rules:
+            state = r.get("state", "?")
+            tag = "up" if state == "up" else "off" if not r.get("enabled", True) else "down"
+            self.tree.insert("", "end", iid=r.get("id"), tags=(tag,), values=(
+                "✓" if r.get("enabled", True) else "—", r.get("dir"),
+                r.get("listen"), r.get("target"), state, r.get("note", "")))
+        self.statusbar.config(text=f"已连接 · 规则 {len(self.rules)} 条 · 端口 {CONF.get('WLT_AGENT_PORT')}")
+        if self._tray:
+            self._tray.set_tooltip(f"WinLinuxTunnel — 已连接，{len(self.rules)} 条规则")
 
     def _set_card(self, card, value, color, detail):
         _, val, det = card
