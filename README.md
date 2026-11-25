@@ -2,7 +2,7 @@
 
 **在 Linux 终端里操作 Windows 桌面 + 任意双向 SSH 隧道 —— 隧道由 Windows 自己发起。**
 
-> 🚧 **早期开发中（M0）**。完整设计见 [DESIGN.md](DESIGN.md)。
+> **v0.1.0 已发布** · [下载零依赖发布包](https://github.com/zhooxc/wlx/releases/latest) · 完整设计见 [DESIGN.md](DESIGN.md)。
 > 仿照 [WinLinuxBridge](https://github.com/Fatmear/WinLinuxBridge)（MIT）重新实现的轻量级工具，
 > 继承其经过验证的执行语义，新增**规则驱动的任意方向隧道**与**中文图形界面**。
 > 借用代码的归属声明见 [NOTICE](NOTICE)。
@@ -69,7 +69,9 @@
 
 ## 快速开始
 
-*（M0 完成后补充：下载发布包 → 双击 `win\start-gui.vbs` → 向导安装 → Linux 上 `wlx status`）*
+1. 从 [Releases](https://github.com/zhooxc/wlx/releases/latest) 下载 `wlx-0.1.0.zip`，**完整解压**（含便携运行时，目标机无需装 Python）。
+2. Windows：双击 `win\start-gui.vbs` → 「配置」页 → 「运行安装向导」，填 Linux 地址/账号，**输入一次 Linux 密码**。
+3. Linux：`~/wlx/linux/wlx status` 开始用（建议 `alias wlx=~/wlx/linux/wlx`）。
 
 ```
 wlx status                          # 隧道 / 代理 / 规则健康一览
