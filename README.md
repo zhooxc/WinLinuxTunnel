@@ -98,6 +98,20 @@ wlt tunnel list                     # 每条规则的实时状态
 wlt shot                            # 截图
 ```
 
+## 命令一览
+
+```
+wlt run [--cwd PATH] [--env K=V] [--exe PROGRAM -- 参数] [--timeout N] <命令>
+wlt run --request-id ID [--no-wait | --wait N] ...   # 改走持久化 job（去重 / 不等待）
+wlt windows [--json]                 # 窗口（参考项目里 wl ps 列的是这个）
+wlt close --title T | --hwnd H       # 发送 WM_CLOSE
+wlt proc [--name SUB] [--pid N]      # 进程表
+wlt kill PID                         # 只结束该进程树，拒绝 agent 自身
+wlt log [--source all|agent|control|user] [--lines N]
+```
+
+选项、三超时和 `wlt kill` 的拒绝规则见 [docs/USAGE.md](docs/USAGE.md)。没有 `wlt lanes`。
+
 ## 安全模型
 
 - 代理只监听 `127.0.0.1`；每个请求带 Bearer 令牌。
@@ -111,7 +125,10 @@ wlt shot                            # 截图
 
 wlt 是独立重写，不是 fork。继承其最有价值的部分（持久化任务语义、三超时、
 有界输出、双钥安全模型、隧道自愈），新增任意双向隧道与 GUI，砍掉三条同步车道、
-plink 依赖与 PowerShell 常驻体系。默认端口刻意错开（8788/18081 vs 8787/18080），
+plink 依赖与 PowerShell 常驻体系。`wl ps` 列的是窗口，对应这里的 `wlt windows`；
+进程表是 `wlt proc`，结束进程树是 `wlt kill`（不伤 agent 自身）。`wl run` 始终走
+job；`wlt run` 默认仍是同步执行，只有带上 `--request-id`、`--no-wait` 或 `--wait`
+才进入同一个 job 引擎。默认端口刻意错开（8788/18081 vs 8787/18080），
 **两者可在同一台机器上共存**。详见 [DESIGN.md](DESIGN.md) 与 [NOTICE](NOTICE)。
 
 ## 在 Windows 上构建

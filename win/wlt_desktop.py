@@ -426,10 +426,21 @@ def _find_window(payload):
     raise ValueError("hwnd or title is required")
 
 
+WINDOW_ACTIONS = ("focus", "minimize", "maximize", "close")
+
+
+def normalize_window_action(action):
+    action = str(action or "focus").lower()
+    if action not in WINDOW_ACTIONS:
+        raise ValueError(f"unknown window action: {action}")
+    return action
+
+
 def window_action(payload):
-    user32 = _u32()
-    action = str(payload.get("action") or "focus").lower()
+    # Validate before touching Win32 so a bad action fails without a desktop.
+    action = normalize_window_action(payload.get("action"))
     hwnd = _find_window(payload)
+    user32 = _u32()
     if action == "focus":
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.SetForegroundWindow(hwnd)
@@ -438,10 +449,9 @@ def window_action(payload):
     elif action == "maximize":
         user32.ShowWindow(hwnd, 3)
     elif action == "close":
+        # Asynchronous: the window receives WM_CLOSE and may cancel it.
         user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
-    else:
-        raise ValueError(f"unknown window action: {action}")
-    return {"ok": True, "hwnd": hwnd}
+    return {"ok": True, "action": action, "hwnd": hwnd}
 
 
 def wait_window(payload):

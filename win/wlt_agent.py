@@ -6,8 +6,8 @@ Responsibilities:
   * Keep the CONTROL reverse SSH tunnel alive so Linux can reach this API.
   * Keep the USER tunnel alive: an arbitrary set of -L/-R forwards driven by
     a rule list mirrored from the Linux source of truth.
-  * M0 endpoints: /ping /run /doctor /tunnels/status /tunnels/apply.
-    Desktop ops, persistent jobs and file transfer land in M1.
+  * Endpoints: /ping /run /doctor /tunnels/* /job/* plus desktop, files,
+    /proc /kill, bounded /log, and POST /shutdown. No sync-lane endpoints.
 
 Design notes (see DESIGN.md):
   * Control and user tunnels are TWO separate ssh processes. With
@@ -43,6 +43,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import wlt_desktop as desktop
+import wlt_proc as proc
 from wlt_jobs import JobManager
 
 VERSION = "0.3.0"
@@ -579,6 +580,133 @@ def push_rules_to_linux(conf, rules):
 
 
 # --------------------------------------------------------------------------
+# Bounded log tail (agent + tunnel ssh logs). Never the token file.
+# --------------------------------------------------------------------------
+
+LOG_FILES = {
+    "agent": "agent.log",
+    "control": "tunnel-control.log",
+    "user": "tunnel-user.log",
+}
+DEFAULT_LOG_LINES = 120
+MAX_LOG_LINES = 400
+MAX_LOG_RETURN_BYTES = 32 * 1024
+MAX_LOG_READ_BYTES = 64 * 1024
+
+# Labels are kept; the secret value becomes ***. Exact token values passed in
+# by the caller are scrubbed first so a bare token cannot survive.
+_LOG_SECRET_RES = (
+    (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1***"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1***"),
+    (re.compile(r"(?i)((?:wlt_)?(?:agent_)?token\s*[=:]\s*)\S+"), r"\1***"),
+    (re.compile(r"(?i)((?:password|passwd|pwd|secret|api[_-]?key)\s*[=:]\s*)\S+"), r"\1***"),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"), "***"),
+    (re.compile(r"(?i)(ssh-(?:ed25519|rsa|dss|ecdsa)\s+)[A-Za-z0-9+/=]{20,}"), r"\1***"),
+)
+
+
+def redact_secrets(text, secrets=()):
+    """Return (text, redacted). Does not treat ordinary log words as secrets."""
+    if not text:
+        return "", False
+    redacted = False
+    for secret in secrets or ():
+        secret = str(secret or "")
+        if len(secret) < 8 or secret not in text:
+            continue
+        text = text.replace(secret, "***")
+        redacted = True
+    for pattern, repl in _LOG_SECRET_RES:
+        text, n = pattern.subn(repl, text)
+        if n:
+            redacted = True
+    return text, redacted
+
+
+def clamp_log_lines(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("lines must be an integer")
+    if n < 1:
+        raise ValueError("lines must be >= 1")
+    return min(n, MAX_LOG_LINES)
+
+
+def clip_log_text(text, max_lines, max_bytes):
+    """Keep the tail. Returns (text, truncated)."""
+    max_lines = max(1, int(max_lines))
+    max_bytes = max(1, int(max_bytes))
+    lines = text.splitlines()
+    truncated = len(lines) > max_lines
+    if truncated:
+        lines = lines[-max_lines:]
+    out = "\n".join(lines)
+    encoded = out.encode("utf-8")
+    if len(encoded) > max_bytes:
+        truncated = True
+        chunk = encoded[-max_bytes:]
+        out = chunk.decode("utf-8", errors="ignore")
+        if "\n" in out:
+            out = out.split("\n", 1)[1]
+    return out, truncated
+
+
+def read_log_tail(path, max_lines, max_bytes, read_bytes, secrets=()):
+    """Read only the tail of a log file, then redact and clip."""
+    path = Path(path)
+    if not path.is_file():
+        return {"missing": True, "text": "", "lines": 0, "truncated": False,
+                "redacted": False, "size": 0}
+    size = path.stat().st_size
+    with open(path, "rb") as fh:
+        if size > read_bytes:
+            fh.seek(max(0, size - read_bytes))
+            data = fh.read(read_bytes)
+            truncated_read = True
+            nl = data.find(b"\n")
+            if nl >= 0:
+                data = data[nl + 1:]
+        else:
+            data = fh.read()
+            truncated_read = False
+    text, redacted = redact_secrets(data.decode("utf-8", errors="replace"), secrets)
+    text, clipped = clip_log_text(text, max_lines, max_bytes)
+    if not text:
+        line_count = 0
+    else:
+        line_count = text.count("\n") + (0 if text.endswith("\n") else 1)
+    return {
+        "missing": False,
+        "text": text,
+        "lines": line_count,
+        "truncated": truncated_read or clipped,
+        "redacted": redacted,
+        "size": size,
+    }
+
+
+def read_logs(payload, logs_dir, secrets=()):
+    """Tail agent and/or tunnel logs. `source` is agent|control|user|all."""
+    payload = payload or {}
+    source = str(payload.get("source") or "all").strip().lower()
+    if source not in ("all",) and source not in LOG_FILES:
+        raise ValueError("source must be agent, control, user, or all")
+    raw_lines = payload.get("lines")
+    lines = clamp_log_lines(DEFAULT_LOG_LINES if raw_lines in (None, "") else raw_lines)
+    names = list(LOG_FILES) if source == "all" else [source]
+    logs = []
+    for name in names:
+        info = read_log_tail(
+            Path(logs_dir) / LOG_FILES[name], lines,
+            MAX_LOG_RETURN_BYTES, MAX_LOG_READ_BYTES, secrets)
+        info["source"] = name
+        info["file"] = LOG_FILES[name]
+        logs.append(info)
+    return {"ok": True, "source": source, "lines": lines, "logs": logs}
+
+
+# --------------------------------------------------------------------------
 # HTTP API
 # --------------------------------------------------------------------------
 
@@ -624,7 +752,53 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized",
                              "hint": "Authorization: Bearer <WLT_AGENT_TOKEN>"})
             return
-        routes = {
+        # Installer restart. Not part of the route table: it stops the server
+        # after the response is flushed, and it stays POST-only.
+        if path == "/shutdown":
+            if method != "POST":
+                self._json(405, {"error": "POST required"})
+                return
+            if not self._authorized():
+                self._json(401, {"error": "unauthorized",
+                                 "hint": "Authorization: Bearer <WLT_AGENT_TOKEN>"})
+                return
+            self._json(200, {"ok": True, "shutting_down": True})
+
+            def _stop_later(server):
+                # Let this response flush before serve_forever returns.
+                time.sleep(0.3)
+                server.shutdown()
+
+            threading.Thread(target=_stop_later, args=(self.server,), daemon=True).start()
+            return
+        routes = self.routes()
+        handler = routes.get(path)
+        if handler is None:
+            self._json(404, {"error": "no such endpoint", "path": path,
+                             "endpoints": sorted(routes)})
+            return
+        try:
+            payload = self._payload() if method == "POST" else {}
+            result = handler(payload)
+            self._json(200, result if isinstance(result, dict) else {"result": result})
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
+        except PermissionError as exc:
+            self._json(403, {"error": "permission denied", "detail": str(exc)})
+        except FileNotFoundError as exc:
+            self._json(404, {"error": "not found", "detail": str(exc)})
+        except (ValueError, KeyError, TypeError) as exc:
+            self._json(400, {"error": type(exc).__name__, "detail": str(exc)})
+        except LookupError as exc:
+            self._json(404, {"error": "not found", "detail": str(exc)})
+        except Exception as exc:
+            log.exception("handler error on %s", path)
+            self._json(500, {"error": type(exc).__name__, "detail": str(exc)})
+
+    def routes(self):
+        """Endpoint map. Close is an action on /window, not its own path.
+        Process list is /proc (windows stay on /windows). No lane endpoints."""
+        return {
             "/ping": self._ping,
             "/run": lambda p: run_command(p),
             "/doctor": self._doctor,
@@ -650,46 +824,22 @@ class Handler(BaseHTTPRequestHandler):
             "/http": lambda p: desktop.http_call(p),
             "/file": lambda p: desktop.read_file(p),
             "/fs": lambda p: desktop.fs_op(p),
+            # processes and diagnostics
+            "/proc": lambda p: proc.list_processes(p, os.getpid(), proc.snapshot_processes()),
+            "/kill": self._kill,
+            "/log": lambda p: read_logs(p, LOGS_DIR, [self.token] if self.token else []),
         }
-        if path == "/shutdown":
-            if method != "POST":
-                self._json(405, {"error": "POST required"})
-                return
-            if not self._authorized():
-                self._json(401, {"error": "unauthorized",
-                                 "hint": "Authorization: Bearer <WLT_AGENT_TOKEN>"})
-                return
-            self._json(200, {"ok": True, "shutting_down": True})
 
-            def _stop_later(server):
-                # Let this response flush before serve_forever returns.
-                time.sleep(0.3)
-                server.shutdown()
-
-            threading.Thread(target=_stop_later, args=(self.server,), daemon=True).start()
-            return
-        handler = routes.get(path)
-        if handler is None:
-            self._json(404, {"error": "no such endpoint", "path": path,
-                             "endpoints": sorted(routes)})
-            return
+    def _kill(self, payload):
         try:
-            payload = self._payload() if method == "POST" else {}
-            result = handler(payload)
-            self._json(200, result if isinstance(result, dict) else {"result": result})
-        except (ConnectionResetError, BrokenPipeError):
-            self.close_connection = True
-        except PermissionError as exc:
-            self._json(403, {"error": "permission denied", "detail": str(exc)})
-        except FileNotFoundError as exc:
-            self._json(404, {"error": "not found", "detail": str(exc)})
-        except (ValueError, KeyError, TypeError) as exc:
-            self._json(400, {"error": type(exc).__name__, "detail": str(exc)})
-        except LookupError as exc:
-            self._json(404, {"error": "not found", "detail": str(exc)})
-        except Exception as exc:
-            log.exception("handler error on %s", path)
-            self._json(500, {"error": type(exc).__name__, "detail": str(exc)})
+            result = proc.kill_pid(payload, os.getpid())
+        except (PermissionError, LookupError, ValueError) as exc:
+            # Refusal reasons are pid/policy text, never the bearer token.
+            log.info("kill refused pid=%s: %s", (payload or {}).get("pid"), exc)
+            raise
+        log.info("kill pid %s -> ok=%s rc=%s", result.get("pid"), result.get("ok"),
+                 result.get("taskkill_rc"))
+        return result
 
     def do_GET(self):
         self._dispatch("GET")
