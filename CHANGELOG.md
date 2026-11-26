@@ -25,6 +25,7 @@
 - 新增 `POST /shutdown`（仍要 Bearer，只监听 127.0.0.1），供安装向导干净地重启代理。
 
 ### 新增
+- **双形态发布**：exe 版（PyInstaller onedir + `WinLinuxTunnel-Setup.exe`，另有绿色版 onedir zip）与便携式运行时版（`tools/package_portable.py`，embeddable CPython + Tk，入口 `win\start-gui-portable.vbs` / `win\start-agent-portable.cmd`）。便携版供企业终端白名单拦截打包 exe 的机器使用，与 exe 版同源同功能；见 `docs/PORTABLE.md`。
 - `wlt close --title | --hwnd`：向窗口发送 `WM_CLOSE`（桌面 API 已有 `action=close`，现在从 Linux 可调用）。消息是异步的，窗口可以拒绝；这不是结束进程。
 - `wlt proc`：Windows 进程表（镜像名、pid、父 pid），可按名称子串或 pid 过滤。窗口列表仍是 `wlt windows`。参考项目的 `wl ps` 列的是窗口，所以这里不用 `ps` 这个名字。
 - `wlt kill PID`：`taskkill /F /T /PID` 只结束目标进程树。拒绝 agent 自身、它的祖先、树里包含 agent 或系统关键进程的目标，也拒绝快照里看不见的 pid。不提权。

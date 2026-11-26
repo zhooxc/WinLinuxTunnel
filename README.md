@@ -11,6 +11,20 @@
 
 ---
 
+## 两种使用方式
+
+从 [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) 下载：
+
+| 方式 | 资产 | 用法 |
+|---|---|---|
+| **exe 安装版**（推荐） | `WinLinuxTunnel-Setup.exe` | 运行安装器 → 开始菜单 / 桌面打开 WinLinuxTunnel |
+| **exe 绿色版** | `WinLinuxTunnel-<版本>-onedir.zip` | 解压后直接双击 `WinLinuxTunnel.exe` |
+| **便携式运行时版** | `WinLinuxTunnel-<版本>-portable.zip` | 解压后双击 `win\start-gui-portable.vbs` |
+
+前两者是同一个 PyInstaller 程序（安装版多快捷方式与开机自启）；便携版随包
+python.org 官方解释器，**同源同功能**，用于企业终端白名单拦截打包 exe 的机器。
+见 [docs/PORTABLE.md](docs/PORTABLE.md)。
+
 ## 两个平面
 
 **控制面 —— Linux 操作 Windows 桌面**
@@ -77,7 +91,7 @@
 
 ## 快速开始
 
-1. 在 Windows 上运行 `WinLinuxTunnel-Setup.exe`（见下方「在 Windows 上构建」，或从 [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) 下载）。它把 onedir 程序复制到 `%LOCALAPPDATA%\WinLinuxTunnel\`，并创建开始菜单和桌面快捷方式。不需要管理员。
+1. 在 Windows 上运行 `WinLinuxTunnel-Setup.exe`（见下方「在 Windows 上构建」，或从 [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) 下载）。它把 onedir 程序复制到 `%LOCALAPPDATA%\WinLinuxTunnel\`，并创建开始菜单和桌面快捷方式。不需要管理员。便携版则解压后双击 `win\start-gui-portable.vbs`，后续步骤相同。
 2. 打开 **WinLinuxTunnel**。窗口会在后台启动代理（`WinLinuxTunnel.exe --agent`）。
 3. 「设置」页填写 Linux 地址和账号 → 「运行安装向导」→ 在弹出的控制台里 **输入一次 Linux 密码**。
 4. Linux：`~/wlt/linux/wlt status` 开始用（建议 `alias wlt=~/wlt/linux/wlt`）。
@@ -148,9 +162,16 @@ powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
 | `dist\WinLinuxTunnel\` | onedir。里面的 `WinLinuxTunnel.exe` 才是用户平时运行的程序 |
 | `dist\WinLinuxTunnel-Setup.exe` | 单文件安装器。复制上面的目录到 `%LOCALAPPDATA%\WinLinuxTunnel\`，并建立快捷方式 |
 
-Linux 上的 CI 不产生这个 exe。脚本、spec 和 `win/wlt_main.py` 都在仓库里，换到 Windows 按上面的命令构建即可。
+Linux 上的 CI 不产生这个 exe。脚本、spec 和 `win/wlt_main.py` 都在仓库里，换到 Windows 按上面的命令构建即可。绿色版资产就是把 `dist\WinLinuxTunnel\` 直接压成 zip。
 
-`tools/build-runtime.ps1`（embeddable CPython + 手工补 Tcl/Tk）不再是发布方式，只留给还要那棵旧目录的人。
+**便携式运行时版**（第二种发布形态，供白名单拦截打包 exe 的机器）：
+
+```
+powershell -ExecutionPolicy Bypass -File tools\build-runtime.ps1
+python tools\package_portable.py
+```
+
+产物 `dist\WinLinuxTunnel-<版本>-portable.zip`：源码 + embeddable CPython/Tk，双击 `win\start-gui-portable.vbs` 启动。`build-runtime.ps1` 下载与本机 CPython 同版本的 embeddable 包并嫁接 Tcl/Tk（带真实 Tk 自检）；`package_portable.py` 复用 `wlt_payload` 的密钥/状态排除规则。详见 [docs/PORTABLE.md](docs/PORTABLE.md)。
 
 ## 许可
 
