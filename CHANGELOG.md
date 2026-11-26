@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 变更
+- **应用图标重绘**：更清晰的双向箭头、与 GUI 强调色一致的蓝色渐变；每个尺寸
+  （16–256）原生绘制并加粗小图标笔画，避免托盘 / 任务栏里被系统缩小后发糊。
+  重新生成：`python tools/make_icon.py` → `win/wlt.ico` + `win/wlt.png`。
+
 ## [0.3.0] - 2026-11-25
 
 ### 变更
