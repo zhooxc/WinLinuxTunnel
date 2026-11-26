@@ -4,9 +4,14 @@
 #   1. create two dedicated ed25519 keys (tunnel + management)
 #   2. install their public keys on Linux via `ssh "bash -s"` - the ONE step
 #      that uses your Linux password, typed interactively, never stored
-#   3. upload linux/tools/docs to ~/wlt (Windows runtime stays Windows-only)
+#   3. upload linux/docs to ~/wlt (the Windows app stays on Windows)
 #   4. write local conf + token (ACL-protected) and the user env var
-#   5. register current-user autostart (Startup folder) and start the agent
+#   5. register current-user autostart of WinLinuxTunnel.exe --agent
+#      (dev: pythonw.exe win\wlt_main.py --agent). No .vbs / .cmd wrapper.
+#   6. restart the resident agent so it reloads the new conf and token
+#
+# The GUI calls this with -LinuxHost/-LinuxUser already filled in. The
+# console is only here so ssh can ask for the Linux password.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File win\install-win.ps1
@@ -23,8 +28,17 @@ param(
     [switch]$NoStart
 )
 $ErrorActionPreference = 'Stop'
-$win = $PSScriptRoot
-$root = Split-Path -Parent $win
+$here = $PSScriptRoot
+# Source tree: this script lives in win\ and linux\ is one level up.
+# Installed app: build-windows.ps1 copies this script next to linux\ and the exe.
+if (Test-Path -LiteralPath (Join-Path $here 'linux\wlt')) {
+    $root = $here
+} else {
+    $root = Split-Path -Parent $here
+}
+if (-not (Test-Path -LiteralPath (Join-Path $root 'linux\wlt'))) {
+    throw "cannot find linux\wlt (looked in $root)"
+}
 $app = Join-Path $env:USERPROFILE '.wlt'
 $keys = Join-Path $app 'keys'
 
@@ -55,11 +69,131 @@ function Find-Exe($name) {
     return $null
 }
 
+function Find-AppExe {
+    # Only the copy sitting next to this script. A source-tree install must
+    # not latch onto an older dist\ or LocalAppData build.
+    $beside = Join-Path $here 'WinLinuxTunnel.exe'
+    if (Test-Path -LiteralPath $beside) { return (Resolve-Path -LiteralPath $beside).Path }
+    return $null
+}
+
+function Find-Pythonw {
+    $cmd = Get-Command pythonw -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py) {
+        $sibling = Join-Path (Split-Path -Parent $py.Source) 'pythonw.exe'
+        if (Test-Path -LiteralPath $sibling) { return $sibling }
+        return $py.Source
+    }
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        try {
+            $exe = (& py -3 -c "import sys; print(sys.executable)").Trim()
+            if ($exe) {
+                $sibling = Join-Path (Split-Path -Parent $exe) 'pythonw.exe'
+                if (Test-Path -LiteralPath $sibling) { return $sibling }
+                return $exe
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Test-PortOpen([int]$Port) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $wait = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        $ok = $wait.AsyncWaitHandle.WaitOne(300, $false)
+        if (-not $ok) { return $false }
+        $client.EndConnect($wait)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+function Stop-WltAgent([string]$Token, [int]$Port) {
+    # The running agent still has the previous token in memory. Ask it to
+    # exit cleanly (it closes its ssh children) before we start a new one
+    # that reads the token file we just wrote. If it is listening on a
+    # different port than the one we are about to configure, the HTTP call
+    # misses and the pid file below is the fallback.
+    if ($Token -and (Test-PortOpen $Port)) {
+        try {
+            $headers = @{ Authorization = "Bearer $Token" }
+            Invoke-WebRequest -Method POST -Uri "http://127.0.0.1:$Port/shutdown" `
+                -Headers $headers -UseBasicParsing -TimeoutSec 3 | Out-Null
+        } catch { }
+        $deadline = (Get-Date).AddSeconds(6)
+        while ((Get-Date) -lt $deadline -and (Test-PortOpen $Port)) {
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    $pidFile = Join-Path $app 'agent.pid'
+    if (-not (Test-Path -LiteralPath $pidFile)) { return }
+    $agentPid = 0
+    $text = (Get-Content -LiteralPath $pidFile -TotalCount 1).Trim()
+    [void][int]::TryParse($text, [ref]$agentPid)
+    if ($agentPid -le 0) { return }
+    $cli = ''
+    try {
+        $cli = (Get-CimInstance Win32_Process -Filter "ProcessId=$agentPid" -ErrorAction Stop).CommandLine
+    } catch { return }
+    if ($cli -match 'wlt_main|wlt_agent|--agent|WinLinuxTunnel') {
+        Stop-Process -Id $agentPid -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 400
+    }
+}
+
+function Register-Autostart([string]$ExePath, [string]$Pythonw) {
+    $startup = [Environment]::GetFolderPath('Startup')
+    $legacy = Join-Path $startup 'wlt.vbs'
+    if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force }
+    $lnk = Join-Path $startup 'WinLinuxTunnel.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($lnk)
+    if ($ExePath) {
+        $sc.TargetPath = $ExePath
+        $sc.Arguments = '--agent'
+        $sc.WorkingDirectory = Split-Path -Parent $ExePath
+    } else {
+        if (-not $Pythonw) { throw 'Python 3.8+ is required (pythonw.exe) to register autostart from source' }
+        $entry = Join-Path $here 'wlt_main.py'
+        $sc.TargetPath = $Pythonw
+        $sc.Arguments = '"' + $entry + '" --agent'
+        $sc.WorkingDirectory = $here
+    }
+    $sc.WindowStyle = 7
+    $sc.Description = 'WinLinuxTunnel agent'
+    $sc.Save()
+    return $lnk
+}
+
+function Start-WltAgent([string]$ExePath, [string]$Pythonw) {
+    if ($ExePath) {
+        Start-Process -FilePath $ExePath -ArgumentList '--agent' `
+            -WorkingDirectory (Split-Path -Parent $ExePath) -WindowStyle Hidden
+        return
+    }
+    if (-not $Pythonw) { throw 'Python 3.8+ is required to start the agent from source' }
+    $entry = Join-Path $here 'wlt_main.py'
+    Start-Process -FilePath $Pythonw -ArgumentList ('"' + $entry + '" --agent') `
+        -WorkingDirectory $here -WindowStyle Hidden
+}
+
 $ssh = Find-Exe 'ssh'
 $scp = Find-Exe 'scp'
 $keygen = Find-Exe 'ssh-keygen'
 if (-not $ssh -or -not $scp -or -not $keygen) {
     throw 'Windows OpenSSH client (ssh/scp/ssh-keygen) is required (Win10 1809+ built-in)'
+}
+
+$oldToken = ''
+$oldTokenPath = Join-Path $app 'agent.token'
+if (Test-Path -LiteralPath $oldTokenPath) {
+    $oldToken = (Get-Content -LiteralPath $oldTokenPath -Raw).Trim()
 }
 
 if (-not $LinuxHost) { $LinuxHost = Read-Host 'Linux host (the address Windows dials to)' }
@@ -106,7 +240,7 @@ Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 if ($rc -ne 0) { throw "Linux key install failed (ssh exit $rc)" }
 Ok 'keys installed on Linux'
 
-Step 'Uploading linux/tools/docs to Linux'
+Step 'Uploading linux/docs to Linux'
 $scpCommon = "-i `"$mgmtKey`" -P $SshPort -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
 foreach ($item in @('linux', 'tools', 'docs', 'README.md', 'VERSION', 'LICENSE', 'NOTICE')) {
     $src = Join-Path $root $item
@@ -129,20 +263,29 @@ $conf = @(
 # Restrict the token file to the current user only.
 $null = Run-Exe 'icacls' "`"$app\agent.token`" /inheritance:r /grant:r `"$($env:USERNAME):(R,W)`""
 [Environment]::SetEnvironmentVariable('WLT_AGENT_TOKEN', $token, 'User')
+# This process's environment, so the agent we start below sees the new token
+# (a user-env write does not update processes that are already running).
+$env:WLT_AGENT_TOKEN = $token
 Ok 'config + token written; user env var WLT_AGENT_TOKEN set'
 
+$appExe = Find-AppExe
+$pythonw = $null
+if (-not $appExe) { $pythonw = Find-Pythonw }
+
+Step 'Restarting the agent so it loads the new config'
+Stop-WltAgent -Token $oldToken -Port $AgentPort
+
 Step 'Registering autostart (current user)'
-$startup = [Environment]::GetFolderPath('Startup')
-$vbs = Join-Path $startup 'wlt.vbs'
-$vbsText = "Set sh = CreateObject(`"WScript.Shell`")`r`nsh.Run `"`"`"$win\start-win.cmd`"`"`", 0, False`r`n"
-[IO.File]::WriteAllText($vbs, $vbsText, (New-Object Text.UTF8Encoding($false)))
-Ok "autostart: $vbs"
+$lnk = Register-Autostart -ExePath $appExe -Pythonw $pythonw
+if ($appExe) { Ok "autostart: $lnk -> $appExe --agent" }
+else { Ok "autostart: $lnk -> pythonw wlt_main.py --agent (dev)" }
 
 if (-not $NoStart) {
     Step 'Starting the agent'
-    & wscript.exe (Join-Path $win 'start-win.vbs')
-    Start-Sleep -Seconds 2
-    Ok 'agent launched (hidden, with crash-restart loop)'
+    Start-WltAgent -ExePath $appExe -Pythonw $pythonw
+    Start-Sleep -Seconds 1
+    if (Test-PortOpen $AgentPort) { Ok 'agent is listening' }
+    else { Warn 'agent port not open yet; the GUI will start it, or see %USERPROFILE%\.wlt\logs\' }
 }
 
 Write-Host ''
@@ -151,4 +294,4 @@ Write-Host "  $RemoteRoot/linux/wlt status"
 Write-Host "  $RemoteRoot/linux/wlt run `"ipconfig`""
 Write-Host "  $RemoteRoot/linux/wlt tunnel add L 3080 127.0.0.1:3080"
 Write-Host ''
-Write-Host 'Tip: add ~/wlt/linux to PATH, or alias wlt=~/wlt/linux/wlt' -ForegroundColor Yellow
+Write-Host 'Open WinLinuxTunnel from the Start Menu. It talks to the agent on 127.0.0.1.' -ForegroundColor Yellow

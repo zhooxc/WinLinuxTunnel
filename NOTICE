@@ -40,10 +40,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 -------------------------------------------------------------------------------
 
-Third-party components bundled in the release archive (not in this source
-repository) keep their own licences:
+This source repository does not vendor a Python runtime. A Windows build made
+with tools/build-windows.ps1 embeds, inside the install directory only:
 
-  CPython (embeddable build)  PSF License          win/runtime/
-  Tcl/Tk                      Tcl/Tk License       win/runtime/tcl/
+  CPython                     PSF License          (the build machine's interpreter)
+  Tcl/Tk                      Tcl/Tk License       (shipped with that CPython)
+  PyInstaller bootloader      GPL-2.0 with an exception that allows bundling
+                              it inside an application built by PyInstaller
+                              https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt
 
-Their licence texts are shipped alongside them in win/runtime/.
+The old embeddable-CPython tree (win/runtime/) is no longer the distribution.
+If you still build it with tools/build-runtime.ps1, its licence texts are
+copied next to that tree and are not part of this repository.

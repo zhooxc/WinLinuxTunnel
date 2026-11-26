@@ -1,9 +1,7 @@
-' wlt GUI - hidden-console launch (Tk window still shows).
+' DEV HELPER only. End users double-click WinLinuxTunnel.exe.
+' Launches the unified entry with the windowless Python launcher.
+' The GUI starts the agent itself when the single-instance lock is free.
 Set fso = CreateObject("Scripting.FileSystemObject")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
 Set sh = CreateObject("WScript.Shell")
-py = here & "\runtime\pythonw.exe"
-If Not fso.FileExists(py) Then
-    py = "pythonw"
-End If
-sh.Run """" & py & """ """ & here & "\wlt_gui.pyw""", 0, False
+sh.Run "pyw -3 """ & here & "\wlt_main.py""", 0, False

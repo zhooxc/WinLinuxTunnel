@@ -5,6 +5,28 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-25
+
+### 变更
+- **Windows 只面对一个程序 `WinLinuxTunnel.exe`**。双击打开窗口和托盘；同一个文件加
+  `--agent` 启动常驻代理（无控制台）。窗口发现代理没在跑时会自己把它拉起来
+  （开发模式下用当前解释器执行 `wlt_main.py --agent`，不新开控制台）。
+  代理仍是独立进程，窗口崩溃不会带走它。单实例锁行为不变。
+- **安装方式改为 onedir + 单文件安装器**。`tools\build-windows.ps1` 用 PyInstaller
+  打出 `dist\WinLinuxTunnel\`（常驻目录版，不是每次启动都解压的 onefile），再打出
+  `dist\WinLinuxTunnel-Setup.exe`。安装器把目录复制到 `%LOCALAPPDATA%\WinLinuxTunnel\`，
+  并创建开始菜单、桌面和「启动」文件夹快捷方式。目标机仍然不需要管理员、Python 或 plink。
+- **自启不再注册 vbs/cmd**。`install-win.ps1` 写入 `WinLinuxTunnel.exe --agent` 的快捷方式
+  （源码运行时则是 `pythonw wlt_main.py --agent`），并删掉旧的 `wlt.vbs`。
+- **设置页承担首次配置**：填写 Linux 地址和账号后运行安装向导。密码仍在弹出的
+  ssh 控制台里输入一次。向导结束后会让旧代理退出，再按新配置启动。
+- `start-gui.vbs` / `start-win.vbs` / `start-win.cmd` 降为开发辅助，文档不再把它们当作用户入口。
+- `tools/build-runtime.ps1`（embeddable CPython + 手工补 Tcl/Tk）不再是发布路径。
+- 新增 `POST /shutdown`（仍要 Bearer，只监听 127.0.0.1），供安装向导干净地重启代理。
+
+### 说明
+- 本仓库在 Linux 上不产出 `.exe`。Windows 开发者按 README / USAGE 里的命令构建即可。
+
 ## [0.2.2] - 2026-11-25
 
 ### 优化
