@@ -2,9 +2,9 @@
 
 **在 Linux 终端里操作 Windows 桌面 + 任意双向 SSH 隧道 —— 隧道由 Windows 自己发起。**
 
-> 命令行工具名 **`wlt`**。Windows 侧是带系统托盘的中文桌面软件（可最小化到任务栏/通知区域）。
+> 命令行工具名 **`wlt`**。Windows 侧是一个带系统托盘的中文桌面程序：用户双击 **`WinLinuxTunnel.exe`**（安装后在开始菜单 / 桌面）。同一个 exe 加 `--agent` 是常驻代理。
 >
-> **v0.3.0** · [下载零依赖发布包](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) · 完整设计见 [DESIGN.md](DESIGN.md)。
+> **v0.3.0** · [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) · 完整设计见 [DESIGN.md](DESIGN.md)。
 > 仿照 [WinLinuxBridge](https://github.com/Fatmear/WinLinuxBridge)（MIT）重新实现的轻量级工具，
 > 继承其经过验证的执行语义，新增**规则驱动的任意方向隧道**与**中文图形界面**。
 > 借用代码的归属声明见 [NOTICE](NOTICE)。
@@ -33,7 +33,7 @@
 ## 架构
 
 ```
- Linux 主机（sshd 即服务端，无守护进程）           Windows 桌面（用户态，零安装）
+ Linux 主机（sshd 即服务端，无守护进程）           Windows 桌面（用户态，无需管理员）
  ─────────────────────────────────────           ──────────────────────────────
  ~/.wlt/                                         %USERPROFILE%\.wlt\
  ├── tunnels.json  规则真相源                    ├── wlt.conf / tunnels.json 镜像
@@ -42,11 +42,14 @@
                                                  └── jobs\ 持久化任务
         ▲
         │ ① 控制隧道（固定 -R，独立 ssh 进程）
- wlt run / job / shot ──► 127.0.0.1:18081 ═════► 127.0.0.1:8788  wlt_agent.py
+ wlt run / job / shot ──► 127.0.0.1:18081 ═════► 127.0.0.1:8788  WinLinuxTunnel.exe --agent
         │                                         ├ HTTP + Bearer 鉴权
         │ ② 用户隧道（规则驱动，独立 ssh 进程）    ├ 持久化 job 引擎
         │   -L 127.0.0.1:3080:127.0.0.1:3080      ├ 隧道管理（看门狗/退避/热应用）
         │   -R 127.0.0.1:19000:127.0.0.1:9000     └ 桌面/文件/剪贴板（ctypes）
+        │
+        │                          WinLinuxTunnel.exe（GUI）只通过上面的 HTTP 口访问代理。
+        │                          窗口自己拉起 --agent；窗口崩溃不会带走代理。
         │
  Windows 应用 ──► 127.0.0.1:3080 ══②-L════════► Linux 127.0.0.1:3080
  Linux 应用  ──► 127.0.0.1:19000 ══②-R════════► Windows 127.0.0.1:9000
@@ -57,23 +60,35 @@
 
 ## 图形界面（Windows 侧，中文）
 
-- 首次运行向导：填 Linux 地址 / 账号 / 密码，一键安装并启动
+- 双击 `WinLinuxTunnel.exe`。代理没在跑时，窗口会自己启动它（无需再点别的脚本）。
+- 「设置」页填写 Linux 地址 / 账号，运行安装向导。密码只在弹出的控制台里输入一次。
 - 隧道面板：规则列表（方向 / 监听→目标 / 启用勾选 / 实时状态），增删改对话框
-- 状态页：代理、控制隧道、用户隧道健康一览 + 日志尾随
+- 概览页：代理、控制隧道、用户隧道健康一览；日志页尾随本地日志
 
 ## 环境要求
 
 | 侧 | 需要 | 不需要 |
 |---|---|---|
-| Windows 10/11 | 系统自带 OpenSSH 客户端 | 管理员、装 Python（发布包自带便携运行时）、plink |
+| Windows 10/11（1809+） | 系统自带 OpenSSH 客户端（`ssh` / `scp` / `ssh-keygen`） | 管理员、自行安装 Python、plink |
 | Linux | python3、sshd、一个普通账号 | root、装系统包、任何守护进程 |
 | 网络 | Windows 能 SSH 到 Linux | Linux→Windows 的任何入站通路 |
 
+安装包把程序放到 `%LOCALAPPDATA%\WinLinuxTunnel\`。配置和状态仍在 `%USERPROFILE%\.wlt\`。
+
 ## 快速开始
 
-1. 从 [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) 下载 `wlt-0.1.0.zip`，**完整解压**（含便携运行时，目标机无需装 Python）。
-2. Windows：双击 `win\start-gui.vbs` → 「配置」页 → 「运行安装向导」，填 Linux 地址/账号，**输入一次 Linux 密码**。
-3. Linux：`~/wlt/linux/wlt status` 开始用（建议 `alias wlt=~/wlt/linux/wlt`）。
+1. 在 Windows 上运行 `WinLinuxTunnel-Setup.exe`（见下方「在 Windows 上构建」，或从 [Releases](https://github.com/zhooxc/WinLinuxTunnel/releases/latest) 下载）。它把 onedir 程序复制到 `%LOCALAPPDATA%\WinLinuxTunnel\`，并创建开始菜单和桌面快捷方式。不需要管理员。
+2. 打开 **WinLinuxTunnel**。窗口会在后台启动代理（`WinLinuxTunnel.exe --agent`）。
+3. 「设置」页填写 Linux 地址和账号 → 「运行安装向导」→ 在弹出的控制台里 **输入一次 Linux 密码**。
+4. Linux：`~/wlt/linux/wlt status` 开始用（建议 `alias wlt=~/wlt/linux/wlt`）。
+
+开发机没有安装包时，用系统 Python（3.8+，带 Tk）即可，不必准备便携运行时：
+
+```
+python win/wlt_main.py              # 窗口；代理没起会自己拉起
+python win/wlt_main.py --agent      # 只跑常驻代理（无窗口）
+python win/wlt_main.py --minimized  # 启动即进托盘
+```
 
 ```
 wlt status                          # 隧道 / 代理 / 规则健康一览
@@ -116,6 +131,27 @@ job；`wlt run` 默认仍是同步执行，只有带上 `--request-id`、`--no-w
 才进入同一个 job 引擎。默认端口刻意错开（8788/18081 vs 8787/18080），
 **两者可在同一台机器上共存**。详见 [DESIGN.md](DESIGN.md) 与 [NOTICE](NOTICE)。
 
+## 在 Windows 上构建
+
+目标机拿到的是 **一个安装程序** `WinLinuxTunnel-Setup.exe`。它只在安装时解压一次。常驻的是目录版程序（`WinLinuxTunnel.exe` 加旁边的依赖），不是每次启动都解压到临时目录的 onefile。
+
+在一台 Windows 10/11 上（需要 python.org 的 CPython 3.8+，自带 Tcl/Tk；不要用 embeddable 压缩包）：
+
+```
+powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
+```
+
+产物：
+
+| 路径 | 是什么 |
+|---|---|
+| `dist\WinLinuxTunnel\` | onedir。里面的 `WinLinuxTunnel.exe` 才是用户平时运行的程序 |
+| `dist\WinLinuxTunnel-Setup.exe` | 单文件安装器。复制上面的目录到 `%LOCALAPPDATA%\WinLinuxTunnel\`，并建立快捷方式 |
+
+Linux 上的 CI 不产生这个 exe。脚本、spec 和 `win/wlt_main.py` 都在仓库里，换到 Windows 按上面的命令构建即可。
+
+`tools/build-runtime.ps1`（embeddable CPython + 手工补 Tcl/Tk）不再是发布方式，只留给还要那棵旧目录的人。
+
 ## 许可
 
-[MIT](LICENSE)。随包第三方组件（CPython、Tcl/Tk）保留各自许可。
+[MIT](LICENSE)。用 PyInstaller 打出来的 Windows 安装包会带上构建机的 CPython、Tcl/Tk，以及 PyInstaller bootloader（带有允许随应用分发的例外条款）。这些不在本仓库源码里。详见 [NOTICE](NOTICE)。

@@ -1,24 +1,17 @@
 @echo off
-rem wlt agent launcher with crash-restart loop (no admin, no service).
-rem A native crash in a desktop op must not permanently kill the bridge:
-rem this loop relaunches the agent after any exit. The agent's single-instance
-rem lock makes a duplicate start a harmless no-op.
+rem DEV HELPER only. End users run WinLinuxTunnel.exe (the GUI starts the agent).
+rem Crash-restart loop for agent development. The single-instance lock makes
+rem a duplicate start a no-op. Do not register this file for autostart.
 setlocal EnableExtensions
 set "HERE=%~dp0"
 set "PY="
-if exist "%HERE%runtime\python.exe" set "PY=%HERE%runtime\python.exe"
+where py >nul 2>&1 && set "PY=py -3"
+if not defined PY where python >nul 2>&1 && set "PY=python"
 if not defined PY (
-    where py >nul 2>&1 && set "PY=py -3"
-)
-if not defined PY (
-    where python >nul 2>&1 && set "PY=python"
-)
-if not defined PY (
-    echo wlt: no Python found ^(need runtime\python.exe or system python^) >&2
+    echo wlt: Python 3.8+ not found. Install Python, or run WinLinuxTunnel.exe. >&2
     exit /b 1
 )
 :loop
-%PY% "%HERE%wlt_agent.py"
-rem ~3s pause before restart (ping works without a console stdin, unlike timeout)
+%PY% "%HERE%wlt_main.py" --agent
 ping -n 4 127.0.0.1 >nul
 goto loop

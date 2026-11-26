@@ -7,7 +7,7 @@ Responsibilities:
   * Keep the USER tunnel alive: an arbitrary set of -L/-R forwards driven by
     a rule list mirrored from the Linux source of truth.
   * Endpoints: /ping /run /doctor /tunnels/* /job/* plus desktop, files,
-    /proc /kill and bounded /log. No sync-lane endpoints.
+    /proc /kill, bounded /log, and POST /shutdown. No sync-lane endpoints.
 
 Design notes (see DESIGN.md):
   * Control and user tunnels are TWO separate ssh processes. With
@@ -55,6 +55,7 @@ VERSION = "0.3.0"
 APP_DIR = Path(os.environ.get("WLT_APP_DIR", str(Path.home() / ".wlt")))
 CONF_PATH = APP_DIR / "wlt.conf"
 TOKEN_PATH = APP_DIR / "agent.token"
+PID_PATH = APP_DIR / "agent.pid"
 RULES_PATH = APP_DIR / "tunnels.json"
 KEYS_DIR = APP_DIR / "keys"
 LOGS_DIR = APP_DIR / "logs"
@@ -101,11 +102,13 @@ def setup_logging():
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     fh = logging.FileHandler(LOGS_DIR / "agent.log", encoding="utf-8")
     fh.setFormatter(fmt)
-    sh = logging.StreamHandler(sys.stderr)
-    sh.setFormatter(fmt)
     log.setLevel(logging.INFO)
     log.addHandler(fh)
-    log.addHandler(sh)
+    # A windowed --agent exe has no console; stderr may be None.
+    if sys.stderr is not None:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(fmt)
+        log.addHandler(sh)
 
 
 def now_iso():
@@ -749,6 +752,25 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized",
                              "hint": "Authorization: Bearer <WLT_AGENT_TOKEN>"})
             return
+        # Installer restart. Not part of the route table: it stops the server
+        # after the response is flushed, and it stays POST-only.
+        if path == "/shutdown":
+            if method != "POST":
+                self._json(405, {"error": "POST required"})
+                return
+            if not self._authorized():
+                self._json(401, {"error": "unauthorized",
+                                 "hint": "Authorization: Bearer <WLT_AGENT_TOKEN>"})
+                return
+            self._json(200, {"ok": True, "shutting_down": True})
+
+            def _stop_later(server):
+                # Let this response flush before serve_forever returns.
+                time.sleep(0.3)
+                server.shutdown()
+
+            threading.Thread(target=_stop_later, args=(self.server,), daemon=True).start()
+            return
         routes = self.routes()
         handler = routes.get(path)
         if handler is None:
@@ -879,6 +901,21 @@ class Handler(BaseHTTPRequestHandler):
 # Single instance + main
 # --------------------------------------------------------------------------
 
+def _write_pid():
+    try:
+        PID_PATH.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        log.warning("could not write %s", PID_PATH)
+
+
+def _clear_pid():
+    try:
+        if PID_PATH.exists() and PID_PATH.read_text(encoding="ascii").strip() == str(os.getpid()):
+            PID_PATH.unlink()
+    except OSError:
+        pass
+
+
 def acquire_lock():
     """Cross-platform single-instance lock via an OS file lock."""
     APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -894,6 +931,7 @@ def acquire_lock():
     except OSError:
         fh.close()
         return None
+    _write_pid()
     return fh  # keep open for process lifetime
 
 
@@ -935,6 +973,7 @@ def main():
     finally:
         manager.shutdown()
         httpd.server_close()
+        _clear_pid()
         log.info("wlt agent exit")
 
 

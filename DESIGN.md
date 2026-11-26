@@ -10,7 +10,8 @@
 >    （`-L`，对应参考截图 `-L 127.0.0.1:3080 -> 127.0.0.1:3080` + 自动重连）。
 >
 > 已确认决策（2026-11-25）：名字 wlt；**要 GUI（中文、用户友好）**；桌面能力按原工程全集
-> 并补充优化；**发布包目标机零依赖**（随包便携 CPython + Tcl/Tk）。
+> 并补充优化。Windows 分发（0.3.0 起）是 **PyInstaller onedir + 单文件安装器**，
+> 目标机仍不需要自装 Python、管理员或 plink。
 
 ---
 
@@ -24,11 +25,11 @@
 | GUI | Tk 配置界面（英文混排） | **Tk 中文界面**：安装向导 + 隧道面板（仿参考截图）+ 状态页 |
 | 一次性密码登录 | 捆绑 plink 0.77 | **系统 ssh.exe 交互输密码**（或手动贴公钥），零额外二进制 |
 | 文件同步 | 三条车道 30s 全量比对 + 程序自刷新 | 砍掉。按需 `get`/`put`（走控制隧道，即时） |
-| 运行时 | 便携 CPython 3.13 + Tk + plink | 便携 CPython 3.13 + Tk（GUI 需要），**无 plink** |
+| 运行时 | 便携 CPython 3.13 + Tk + plink | **PyInstaller onedir**（`WinLinuxTunnel.exe`），安装器复制到 `%LOCALAPPDATA%\WinLinuxTunnel\`。**无 plink** |
 | 默认端口 | agent 8787 / 隧道 18080 | **agent 8788 / 隧道 18081**（刻意错开，可与原工程共存） |
 | 代码量 | ~6300 行 | 目标 ~4000 行（含 GUI） |
 | 任务语义 | 持久化 job / 去重 / 三超时 / 有界输出 / LOST | **全部继承** |
-| 自启 | 启动文件夹 + 计划任务 watchdog | 启动文件夹 vbs（进程自愈，v1 不建计划任务） |
+| 自启 | 启动文件夹 + 计划任务 watchdog | 当前用户启动文件夹里的快捷方式：`WinLinuxTunnel.exe --agent`（不建计划任务，不用 vbs） |
 
 **继承不动的设计**（原工程 81 项验证打磨过）：
 - Windows 主动外连，两端零入站端口、零管理员、零系统安装。
@@ -52,14 +53,15 @@
         │ ①控制隧道（固定，独立 ssh 进程）
         │   ssh -N -R 127.0.0.1:18081:127.0.0.1:8788
         │
- wlt run/job/shot/... ──► 127.0.0.1:18081 ═══════► 127.0.0.1:8788  wlt_agent.py
+ wlt run/job/shot/... ──► 127.0.0.1:18081 ═══════► 127.0.0.1:8788  WinLinuxTunnel.exe --agent
         │                                            │  ├ HTTP 线程（Bearer 鉴权）
         │ ②用户隧道（独立 ssh 进程，规则驱动）        │  ├ job 引擎（subprocess/Win32）
         │   ssh -N -L 127.0.0.1:3080:127.0.0.1:3080  │  ├ 隧道管理线程（spawn/看门狗/退避）
         │        -R 127.0.0.1:19000:127.0.0.1:9000   │  └ 桌面/文件/clipboard（ctypes）
         │                                            │
-        │                          wlt_gui.pyw ──────┤  （GUI 是 agent 的本地 HTTP 客户端，
-        │                           Tk 中文界面       │    独立进程，崩了不影响桥）
+        │                     WinLinuxTunnel.exe ────┤  （同一个 exe 不带 --agent 时是 GUI。
+        │                      Tk 中文界面 + 托盘     │    只做本地 HTTP 客户端，崩了不影响桥。
+        │                                            │    代理没在跑时由 GUI 拉起 --agent。）
  Windows 应用 ──► 127.0.0.1:3080 ══②-L══════════► Linux 127.0.0.1:3080 服务
  Linux 应用  ──► 127.0.0.1:19000 ══②-R══════════► Windows 127.0.0.1:9000 服务
 ```
@@ -209,26 +211,35 @@ Linux 密码只安装期交互输入一次，不落盘不进日志（v1 不做�
 ```
 wlt/
 ├── win/
-│   ├── wlt_agent.py      ~900 行  HTTP/鉴权 + 桌面(ctypes) + 文件 + http 代理 + 隧道管理线程
-│   ├── wlt_jobs.py       ~700 行  持久化 job 引擎（状态机/去重/进程树取消/限额/游标/batch）
-│   ├── wlt_gui.pyw       ~800 行  Tk 中文：安装向导 / 隧道面板 / 状态页 / 日志尾随
-│   ├── install-win.ps1   ~250 行  键生成→交互 ssh 装公钥→上传→令牌→自启
-│   ├── start-win.vbs / start-gui.vbs
+│   ├── wlt_main.py       统一入口：GUI，或 --agent 常驻代理
+│   ├── wlt_launch.py     GUI 拉起同一个 exe / 同一个解释器（隐藏、无新控制台）
+│   ├── wlt_agent.py      HTTP/鉴权 + 桌面(ctypes) + 文件 + http 代理 + 隧道管理线程
+│   ├── wlt_jobs.py       持久化 job 引擎（状态机/去重/进程树取消/限额/游标/batch）
+│   ├── wlt_gui.py        Tk 中文：设置 / 隧道面板 / 概览 / 桌面 / 日志
+│   ├── install-win.ps1   键生成→交互 ssh 装公钥→上传→令牌→自启快捷方式
 │   └── wlt.conf.example
 ├── linux/
-│   ├── wlt               ~1100 行 单文件 Python3：CLI + job 客户端 + 规则管理 + authorized_keys 重写
-│   └── install-linux.sh  ~70 行
+│   ├── wlt               单文件 Python3：CLI + job 客户端 + 规则管理 + authorized_keys 重写
+│   └── install-linux.sh
 ├── tools/
-│   ├── build-runtime.ps1          官方 embeddable Python + 补 Tcl/Tk（借原工程思路，无 plink）
-│   ├── package_release.py
-│   └── verify.sh / verify.ps1     冒烟 + 安全负向测试
+│   ├── WinLinuxTunnel.spec   PyInstaller onedir（常驻程序，不是 onefile）
+│   ├── build-windows.ps1     onedir + WinLinuxTunnel-Setup.exe
+│   ├── wlt_setup.py          安装器：复制到 %LOCALAPPDATA%\WinLinuxTunnel，建快捷方式
+│   ├── wlt_payload.py        打安装器要的 payload zip
+│   ├── package_release.py    源码压缩包（不含旧的便携运行时）
+│   └── build-runtime.ps1     旧的 embeddable CPython 路径，已不再作为发布方式
 ├── docs/  README / USAGE / AI-AGENT
 └── DESIGN.md / NOTICE / LICENSE / VERSION / CHANGELOG.md
 ```
 
-发布包：源码 + 便携 CPython 3.13（含 Tk）≈ 25–35MB，目标机零依赖。
-构建脚本从官方源下载 embeddable 包并补 Tcl/Tk 与 `_tkinter.pyd`（embeddable 故意不含），
-用真实 `Tk()` 窗口自检（继承原工程 build-runtime 的做法）。
+Windows 分发：在 Windows 上运行 `tools\build-windows.ps1`。常驻程序是
+`dist\WinLinuxTunnel\`（onedir）。用户下载的单文件是 `dist\WinLinuxTunnel-Setup.exe`，
+只在安装时把该目录复制到 `%LOCALAPPDATA%\WinLinuxTunnel\`，并创建开始菜单 / 桌面快捷方式
+以及「登录时运行 `WinLinuxTunnel.exe --agent`」的启动文件夹快捷方式。
+不用 onefile 当常驻进程（每次启动解压到临时目录：慢、容易被杀毒软件误报、也不好升级）。
+
+开发时不需要这套打包：`python win/wlt_main.py` 使用系统 Python。GUI 在未打包时用
+`sys.executable` 拉起 `wlt_main.py --agent`（`CREATE_NO_WINDOW`，不新开控制台）。
 
 ## 7. 里程碑
 
@@ -238,7 +249,7 @@ wlt/
 | M1 | job 引擎 + 桌面全集 + 文件/http + 补充项 | 原工程核心语义逐条对齐 |
 | M2 | **隧道面**：规则/动态 authorized_keys/热应用/自动重连/probe | 截图场景复现；杀 ssh 自愈；坏规则不伤控制面 |
 | M3 | **GUI**：安装向导 + 隧道面板 + 状态页 | 非技术用户全程鼠标装通、加隧道 |
-| M4 | 加固 + 验证套件 + 文档 + 零依赖发布包 | 负向测试全过；全新机器离线装通 |
+| M4 | 加固 + 验证套件 + 文档 + Windows 安装包 | 负向测试全过；Setup.exe 装到用户目录后离线可用 |
 
 ## 8. 风险与已知限制
 
@@ -251,8 +262,11 @@ wlt/
 ## 9. 已确认决策记录
 
 1. 名字 **wlt**；仓库 github.com/zhooxc/WinLinuxTunnel（public），边开发边推送，不携带原工程 git 历史。
-2. **GUI 必须有**，中文、用户友好；Tk（随包 Tcl/Tk），M3 交付，v1 范围内。
+2. **GUI 必须有**，中文、用户友好；标准库 Tk（打包进安装目录，用户不必另装）。
 3. 桌面能力**原工程全集 + §5 补充项**。
-4. 发布包**目标机零依赖**：随包便携 CPython + Tk；无 plink（交互 ssh 代替）。
+4. 目标机不自装 Python、不用 plink（交互 ssh 代替）。0.3.0 起用 PyInstaller onedir
+   把解释器和 Tcl/Tk 打进安装目录，而不是随 zip 带一份 embeddable CPython。
 5. 许可 MIT + NOTICE 归属；默认端口 8788/18081 与原工程共存。
 6. 开发纪律：不提交任何凭据/主机名/账号；shell 脚本 LF；每个可用增量即 commit + push。
+7. 用户只面对 `WinLinuxTunnel.exe`。`--agent` 是同一个文件的常驻模式。自启注册这个
+   exe，不注册 vbs/cmd。GUI 在单实例锁空闲时自己启动代理。Linux 密码仍走一次交互式 ssh。

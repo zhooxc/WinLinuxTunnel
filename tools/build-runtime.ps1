@@ -1,7 +1,14 @@
-# wlt - build the self-contained Python runtime shipped in win\runtime.
+# LEGACY / OPTIONAL. Not used by the Windows installer.
 #
-# The end user needs no Python, pip or PuTTY. This produces a portable
-# interpreter with working tkinter from two public sources:
+# The app is packaged with tools\build-windows.ps1 (PyInstaller onedir +
+# WinLinuxTunnel-Setup.exe). End users do not need this tree. Development
+# uses a normal python.org CPython; Tk is already in that install.
+#
+# This script remains only if you still want the old embeddable CPython +
+# grafted Tcl/Tk layout under win\runtime. package_release.py does not ship it.
+#
+# The end user of THAT legacy tree needs no Python, pip or PuTTY. It produces
+# a portable interpreter with working tkinter from two public sources:
 #   * python.org embeddable package (interpreter + stdlib + ctypes)
 #   * a full CPython install's tcl/tk runtime + _tkinter extension, which the
 #     embeddable package deliberately omits
